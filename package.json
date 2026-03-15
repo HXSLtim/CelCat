@@ -1,0 +1,12 @@
+{
+  "name": "live2d-desktop-companion",
+  "version": "1.0.0",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev"
+  },
+  "dependencies": {
+    "pixi.js": "^7.3.0"
+  }
+}
