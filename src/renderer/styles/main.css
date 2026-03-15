@@ -1,0 +1,49 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background: transparent;
+  overflow: hidden;
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+#app {
+  width: 100vw;
+  height: 100vh;
+  position: relative;
+}
+
+#live2d-canvas {
+  width: 100%;
+  height: 100%;
+  -webkit-app-region: no-drag;
+}
+
+#controls {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  -webkit-app-region: no-drag;
+}
+
+#controls.hidden {
+  display: none;
+}
+
+#close-btn {
+  background: rgba(255, 255, 255, 0.8);
+  border: none;
+  border-radius: 50%;
+  width: 30px;
+  height: 30px;
+  cursor: pointer;
+  font-size: 16px;
+}
+
+#close-btn:hover {
+  background: rgba(255, 255, 255, 1);
+}
