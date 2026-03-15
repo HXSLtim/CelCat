@@ -30,6 +30,12 @@ class DesktopCompanion {
   }
 
   setupEvents(): void {
+    // Add click interaction
+    (this.app!.stage as any).interactive = true;
+    (this.app!.stage as any).on('pointerdown', (event: any) => {
+      this.live2d!.onTouch(event.global);
+    });
+
     // Show controls on hover
     document.body.addEventListener('mouseenter', () => {
       document.getElementById('controls')?.classList.remove('hidden');

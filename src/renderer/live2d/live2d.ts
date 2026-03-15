@@ -1,12 +1,15 @@
 export class Live2DManager {
   private app: PIXI.Application;
-  private model: PIXI.Graphics | null = null;
+  private model: PIXI.Container | null = null;
 
   constructor(app: PIXI.Application) {
     this.app = app;
   }
 
   async loadModel(): Promise<void> {
+    // Create a container for the model
+    this.model = new PIXI.Container();
+
     // For now, create a simple placeholder
     const graphics = new PIXI.Graphics();
     graphics.beginFill(0x66CCFF);
@@ -23,7 +26,7 @@ export class Live2DManager {
     graphics.lineStyle(3, 0x000000);
     graphics.arc(150, 210, 15, 0, Math.PI);
 
-    this.model = graphics;
+    this.model.addChild(graphics);
     this.app.stage.addChild(this.model);
 
     // Simple animation
@@ -35,8 +38,20 @@ export class Live2DManager {
     this.app.ticker.add(() => {
       time += 0.05;
       if (this.model) {
-        this.model.y = Math.sin(time) * 5 + 200;
+        (this.model as any).y = Math.sin(time) * 5 + 200;
       }
     });
+  }
+
+  onTouch(position: any): void {
+    if (this.model) {
+      // Simple touch response - scale animation
+      const originalScale = (this.model as any).scale.x;
+      (this.model as any).scale.set(originalScale * 1.2, originalScale * 1.2);
+
+      setTimeout(() => {
+        (this.model as any).scale.set(originalScale, originalScale);
+      }, 200);
+    }
   }
 }
