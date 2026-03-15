@@ -1,12 +1,18 @@
 {
   "name": "live2d-desktop-companion",
   "version": "1.0.0",
-  "main": "src/main.js",
+  "main": "dist/main.js",
   "scripts": {
-    "start": "electron .",
-    "dev": "electron . --dev"
+    "build": "tsc",
+    "start": "npm run build && electron .",
+    "dev": "npm run build && electron . --dev"
   },
   "dependencies": {
     "pixi.js": "^7.3.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "@types/node": "^20.0.0",
+    "electron": "^28.0.0"
   }
 }
