@@ -67,6 +67,7 @@ body {
 }
 
 #drag-button,
+#voice-button,
 #menu-button,
 #window-menu {
   pointer-events: auto;
@@ -107,6 +108,14 @@ body {
   -webkit-app-region: no-drag;
 }
 
+#chrome-actions {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#voice-button,
 #menu-button {
   display: inline-flex;
   align-items: center;
@@ -126,9 +135,17 @@ body {
   -webkit-app-region: no-drag;
 }
 
+#voice-button {
+  position: relative;
+  overflow: hidden;
+}
+
 #drag-button:hover,
 #drag-button:focus-visible,
 #drag-button.dragging,
+#voice-button:hover,
+#voice-button:focus-visible,
+#voice-button.is-listening,
 #menu-button:hover {
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.06)),
@@ -139,7 +156,31 @@ body {
   box-shadow: 0 16px 36px rgba(4, 8, 16, 0.24);
 }
 
+#voice-button.is-listening {
+  border-color: rgba(109, 231, 198, 0.36);
+  color: rgba(220, 255, 245, 0.98);
+  box-shadow:
+    0 0 0 1px rgba(109, 231, 198, 0.12),
+    0 16px 36px rgba(4, 8, 16, 0.24);
+}
+
+#voice-button.is-listening::after {
+  content: '';
+  position: absolute;
+  inset: 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(109, 231, 198, 0.3);
+  opacity: 0.8;
+}
+
+#voice-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+  box-shadow: none;
+}
+
 #menu-button:focus-visible,
+#voice-button:focus-visible,
 .window-menu-item:focus-visible {
   outline: 2px solid rgba(212, 175, 55, 0.92);
   outline-offset: 2px;
@@ -148,7 +189,7 @@ body {
 #window-menu {
   position: absolute;
   top: 54px;
-  right: 8px;
+  right: 0;
   min-width: 168px;
   padding: 8px;
   border-radius: 16px;
@@ -163,29 +204,56 @@ body {
   display: none;
 }
 
-.drag-dots {
-  display: inline-grid;
-  grid-template-columns: repeat(3, 5px);
-  gap: 4px;
+#voice-device-panel {
+  display: grid;
+  gap: 8px;
+  padding: 4px 4px 10px;
 }
 
-.drag-dots span,
-.menu-lines span {
-  display: block;
-  background: currentColor;
+#voice-device-panel label {
+  color: rgba(255, 255, 255, 0.72);
+  font: 600 11px/1 'Segoe UI', sans-serif;
+  letter-spacing: 0.04em;
 }
 
-.drag-dots span {
-  width: 5px;
-  height: 5px;
-  border-radius: 999px;
-  opacity: 0.9;
+#voice-device-select {
+  width: 100%;
+  min-height: 38px;
+  padding: 0 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.94);
+  font: 500 12px/1 'Segoe UI', sans-serif;
+  outline: none;
+}
+
+#voice-device-select:focus-visible {
+  border-color: rgba(212, 175, 55, 0.52);
+}
+
+#window-menu-actions {
+  display: grid;
+  gap: 2px;
 }
 
 .drag-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  opacity: 0.9;
+}
+
+.voice-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.94;
+}
+
+.menu-lines span {
+  display: block;
+  background: currentColor;
 }
 
 .menu-lines {
@@ -223,10 +291,54 @@ body {
   color: rgba(255, 214, 214, 0.98);
 }
 
+#voice-status {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  max-width: min(240px, calc(100vw - 24px));
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: rgba(10, 14, 22, 0.66);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.92);
+  font: 500 12px/1.3 'Segoe UI', sans-serif;
+  text-align: center;
+  backdrop-filter: blur(18px) saturate(130%);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.22);
+  opacity: 0;
+  visibility: hidden;
+  transform: translate(-50%, 8px);
+  transition: opacity 180ms ease, transform 180ms ease, visibility 180ms ease;
+  pointer-events: none;
+}
+
+#voice-status.is-visible {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(-50%, 0);
+}
+
+#voice-status[data-tone='listening'] {
+  border-color: rgba(109, 231, 198, 0.22);
+  color: rgba(229, 255, 248, 0.96);
+}
+
+#voice-status[data-tone='error'] {
+  border-color: rgba(255, 170, 170, 0.24);
+  color: rgba(255, 226, 226, 0.96);
+}
+
+#voice-status[data-tone='result'] {
+  border-color: rgba(212, 175, 55, 0.24);
+  color: rgba(255, 247, 216, 0.96);
+}
+
 @media (prefers-reduced-motion: reduce) {
   #window-chrome,
+  #voice-button,
   #menu-button,
-  .window-menu-item {
+  .window-menu-item,
+  #voice-status {
     transition: none;
   }
 }

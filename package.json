@@ -5,7 +5,8 @@
   "scripts": {
     "build": "node scripts/build.cjs",
     "start": "npm run build && node scripts/run-electron.cjs",
-    "dev": "npm run build && node scripts/run-electron.cjs --dev",
+    "dev": "node scripts/dev-watch.cjs",
+    "dev:once": "npm run build && node scripts/run-electron.cjs --dev",
     "test": "npm run build && node --test test/*.test.cjs"
   },
   "dependencies": {

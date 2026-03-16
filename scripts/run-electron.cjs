@@ -1,11 +1,10 @@
-const { spawn } = require('node:child_process');
-const electronBinary = require('electron');
-const { sanitizeElectronEnv } = require('./electron-runner-utils.cjs');
+const path = require('node:path');
+const { spawnElectronProcess } = require('./electron-process.cjs');
 
-const child = spawn(electronBinary, ['.', ...process.argv.slice(2)], {
-  stdio: 'inherit',
-  env: sanitizeElectronEnv(process.env),
-});
+const child = spawnElectronProcess(
+  path.resolve(__dirname, '..'),
+  process.argv.slice(2),
+);
 
 child.on('error', (error) => {
   console.error('Failed to start Electron:', error);

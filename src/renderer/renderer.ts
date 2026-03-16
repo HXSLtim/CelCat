@@ -12,10 +12,13 @@ import {
   isValidWindowPosition,
   type DragSession,
 } from './window-drag';
+import { VoiceRecognitionController } from './voice/voice-recognition';
+import type { VoiceUiState } from './voice/voice-ui';
 
 const { ipcRenderer } = require('electron') as {
   ipcRenderer: {
     invoke(channel: 'window-drag:get-position'): Promise<[number, number]>;
+    invoke(channel: 'voice:transcribe', payload: { audioBuffer: ArrayBuffer; mimeType: string }): Promise<{ text: string }>;
     send(channel: 'window-drag:set-position', nextX: number, nextY: number): void;
   };
 };
@@ -37,6 +40,7 @@ const { Live2DManager } = require('./live2d/live2d') as Live2DModule;
 class DesktopCompanion {
   private app: PIXI.Application | null = null;
   private live2d: Live2DManagerInstance | null = null;
+  private voiceRecognition: VoiceRecognitionController | null = null;
   private menuOpen = false;
   private dragSession: DragSession | null = null;
   private hoveringWindow = false;
@@ -76,6 +80,7 @@ class DesktopCompanion {
     });
 
     this.setupWindowChrome();
+    this.setupVoiceRecognition();
     const appRoot = document.getElementById('app');
     appRoot?.addEventListener('mouseenter', () => {
       this.hoveringWindow = true;
@@ -92,10 +97,11 @@ class DesktopCompanion {
 
   private setupWindowChrome(): void {
     const dragButton = document.getElementById('drag-button');
+    const voiceButton = document.getElementById('voice-button') as HTMLButtonElement | null;
     const menuButton = document.getElementById('menu-button') as HTMLButtonElement | null;
     const menu = document.getElementById('window-menu');
 
-    if (!dragButton || !menuButton || !menu) {
+    if (!dragButton || !voiceButton || !menuButton || !menu) {
       return;
     }
 
@@ -148,6 +154,11 @@ class DesktopCompanion {
     window.addEventListener('pointerup', stopDragging);
     window.addEventListener('blur', stopDragging);
 
+    voiceButton.addEventListener('click', (event) => {
+      event.stopPropagation();
+      this.voiceRecognition?.toggleListening();
+    });
+
     menuButton.addEventListener('click', (event) => {
       event.stopPropagation();
       this.setMenuOpen(getNextMenuOpenState(this.menuOpen, 'toggle'));
@@ -167,6 +178,22 @@ class DesktopCompanion {
     });
 
     this.syncWindowChrome();
+  }
+
+  private setupVoiceRecognition(): void {
+    this.voiceRecognition = new VoiceRecognitionController(
+      Object.assign(window as unknown as Record<string, unknown>, { ipcRenderer }),
+      {
+      onStateChange: (state) => {
+        this.syncVoiceUi(state);
+      },
+      onDeviceListChange: (devices, selectedDeviceId) => {
+        this.syncVoiceDeviceOptions(devices, selectedDeviceId);
+      },
+      onFinalTranscript: (transcript) => {
+        console.log(`Voice transcript: ${transcript}`);
+      },
+    });
   }
 
   private handleMenuAction(action: WindowMenuActionId): void {
@@ -202,6 +229,51 @@ class DesktopCompanion {
     });
 
     chrome?.classList.toggle('chrome-visible', chromeState.visible);
+  }
+
+  private syncVoiceUi(state: VoiceUiState): void {
+    const voiceButton = document.getElementById('voice-button') as HTMLButtonElement | null;
+    const voiceStatus = document.getElementById('voice-status');
+
+    voiceButton?.setAttribute('aria-label', state.buttonLabel);
+    voiceButton?.setAttribute('title', state.buttonTitle);
+    voiceButton?.setAttribute('aria-pressed', String(state.listening));
+    voiceButton?.classList.toggle('is-listening', state.listening);
+    if (voiceButton) {
+      voiceButton.disabled = state.disabled;
+    }
+
+    if (!voiceStatus) {
+      return;
+    }
+
+    voiceStatus.textContent = state.statusText;
+    voiceStatus.dataset.tone = state.statusTone;
+    voiceStatus.classList.toggle('is-visible', state.showStatus);
+  }
+
+  private syncVoiceDeviceOptions(
+    devices: Array<{ id: string; label: string }>,
+    selectedDeviceId: string,
+  ): void {
+    const select = document.getElementById('voice-device-select') as HTMLSelectElement | null;
+
+    if (!select) {
+      return;
+    }
+
+    select.innerHTML = '';
+    for (const device of devices) {
+      const option = document.createElement('option');
+      option.value = device.id;
+      option.textContent = device.label;
+      option.selected = device.id === selectedDeviceId;
+      select.appendChild(option);
+    }
+
+    select.onchange = () => {
+      this.voiceRecognition?.setSelectedDevice(select.value);
+    };
   }
 
   private showFatalError(error: unknown): void {

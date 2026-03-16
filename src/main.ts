@@ -1,5 +1,10 @@
-const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain } = require('electron');
+const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, session } = require('electron');
 const path = require('path');
+const {
+  shouldGrantPermissionCheck,
+  shouldGrantPermissionRequest,
+} = require('./main-process/permissions');
+const { transcribeAudioWithOpenAi } = require('./main-process/openai-transcription');
 
 let mainWindow: Electron.BrowserWindow | null;
 let tray: Electron.Tray | null = null;
@@ -63,7 +68,30 @@ ipcMain.on('window-drag:set-position', (_event: Electron.IpcMainEvent, nextX: nu
   mainWindow?.setPosition(Math.round(nextX), Math.round(nextY));
 });
 
+ipcMain.handle('voice:transcribe', async (_event: Electron.IpcMainInvokeEvent, payload: {
+  audioBuffer: ArrayBuffer;
+  mimeType: string;
+}) => {
+  return transcribeAudioWithOpenAi(payload);
+});
+
 app.whenReady().then(() => {
+  session.defaultSession.setPermissionCheckHandler((
+    _webContents: Electron.WebContents | null,
+    permission: string,
+    _requestingOrigin: string,
+    details: Electron.PermissionCheckHandlerHandlerDetails,
+  ) => {
+    return shouldGrantPermissionCheck(permission, details);
+  });
+  session.defaultSession.setPermissionRequestHandler((
+    _webContents: Electron.WebContents,
+    permission: string,
+    callback: (permissionGranted: boolean) => void,
+    details: Electron.PermissionRequestHandlerHandlerDetails,
+  ) => {
+    callback(shouldGrantPermissionRequest(permission, details));
+  });
   createWindow();
   createTray();
 });
