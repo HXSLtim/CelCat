@@ -7,12 +7,28 @@
 </head>
 <body>
   <div id="app">
-    <canvas id="live2d-canvas"></canvas>
-    <div id="controls" class="hidden">
-      <button id="close-btn">×</button>
+    <div id="window-chrome">
+      <div id="drag-button" aria-hidden="true">
+        <span class="drag-icon drag-dots">
+          <span></span>
+          <span></span>
+          <span></span>
+        </span>
+      </div>
+      <button id="menu-button" type="button" aria-label="打开窗口菜单" aria-expanded="false">
+        <span class="menu-lines">
+          <span></span>
+          <span></span>
+          <span></span>
+        </span>
+      </button>
+      <div id="window-menu" class="hidden" role="menu" aria-hidden="true"></div>
     </div>
+    <canvas id="live2d-canvas"></canvas>
   </div>
-  <script src="https://pixijs.download/release/pixi.min.js"></script>
-  <script src="renderer.js"></script>
+  <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+  <script>
+    require('./renderer.js');
+  </script>
 </body>
 </html>
