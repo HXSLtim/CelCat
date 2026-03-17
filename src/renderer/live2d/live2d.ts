@@ -1,15 +1,15 @@
 import * as PIXI from 'pixi.js';
-import { getModelJsonPath, getModelLoadOptions } from './model-config';
+import { getModelJsonPath, getModelLoadOptions } from './modelConfig';
 import { computeModelLayout } from './layout';
 import { getLogicalViewportSize } from './viewport';
 import { Live2DAction, LIVE2D_ACTIONS } from './actions';
-import { INTERACTION_CONFIG } from './interaction-config';
+import { INTERACTION_CONFIG } from './interactionConfig';
 import {
   computePointerFocus,
   createTapReaction,
   isPointInsideBounds,
   type TapReaction,
-} from './interaction-feedback';
+} from './interactionFeedback';
 
 const { Live2DModel } = require('pixi-live2d-display/cubism4') as {
   Live2DModel: {
@@ -36,6 +36,9 @@ export class Live2DManager {
         reaction: TapReaction;
       }
     | null = null;
+  private lipSyncParameterIds: string[] = [];
+  private speechLevel = 0;
+  private mouthValue = 0;
 
   constructor(app: PIXI.Application) {
     this.app = app;
@@ -60,6 +63,7 @@ export class Live2DManager {
       console.log('Attempting to load Live2D model...');
       this.model = await Live2DModel.from(getModelJsonPath(), getModelLoadOptions());
       console.log('Live2D model loaded successfully:', this.model);
+      this.lipSyncParameterIds = this.getLipSyncParameterIds();
 
       this.app.stage.addChild(this.model);
       this.placeModel();
@@ -151,6 +155,7 @@ export class Live2DManager {
       }
 
       this.applyIdleMotion(time);
+      this.updateSpeechAnimation();
       this.updateTapFeedback();
     });
   }
@@ -179,6 +184,10 @@ export class Live2DManager {
   }
 
   startRandomExpressions(): void {
+    if (!INTERACTION_CONFIG.ambient.randomExpressionsEnabled) {
+      return;
+    }
+
     setInterval(() => {
       if (this.model) {
         const randomExpression = LIVE2D_ACTIONS.expressions[Math.floor(Math.random() * LIVE2D_ACTIONS.expressions.length)];
@@ -189,13 +198,22 @@ export class Live2DManager {
 
   private setParameter(paramName: string, value: number): void {
     if (this.model?.internalModel?.coreModel) {
-      const index = this.model.internalModel.coreModel.getParameterIndex(paramName);
-      this.model.internalModel.coreModel.setParameterValueByIndex(index, value);
+      this.model.internalModel.coreModel.setParameterValueById(paramName, value);
+    }
+  }
+
+  private addParameter(paramName: string, value: number, weight = 1): void {
+    if (this.model?.internalModel?.coreModel) {
+      this.model.internalModel.coreModel.addParameterValueById(paramName, value, weight);
     }
   }
 
   refitModel(): void {
     this.placeModel();
+  }
+
+  setSpeechLevel(level: number): void {
+    this.speechLevel = Math.max(0, Math.min(1, level));
   }
 
   private applyIdleMotion(time: number): void {
@@ -213,6 +231,40 @@ export class Live2DManager {
     }
   }
 
+  private updateSpeechAnimation(): void {
+    if (!this.model?.internalModel?.coreModel) {
+      return;
+    }
+
+    const smoothing = this.speechLevel > this.mouthValue ? 0.62 : 0.18;
+    this.mouthValue += (this.speechLevel - this.mouthValue) * smoothing;
+
+    if (this.speechLevel < 0.01 && this.mouthValue < 0.01) {
+      this.mouthValue = 0;
+    }
+
+    for (const parameterId of this.lipSyncParameterIds) {
+      this.addParameter(parameterId, this.mouthValue, 0.9);
+    }
+
+    if (!this.lipSyncParameterIds.length) {
+      this.addParameter('ParamA', this.mouthValue, 0.9);
+    }
+  }
+
+  private getLipSyncParameterIds(): string[] {
+    const settingsLipSyncIds = this.model?.internalModel?.settings?.getLipSyncParameters?.();
+    if (Array.isArray(settingsLipSyncIds) && settingsLipSyncIds.length) {
+      return settingsLipSyncIds;
+    }
+
+    const motionManagerLipSyncIds = this.model?.internalModel?.motionManager?.lipSyncIds;
+    if (Array.isArray(motionManagerLipSyncIds) && motionManagerLipSyncIds.length) {
+      return motionManagerLipSyncIds;
+    }
+
+    return ['ParamA'];
+  }
   private updateTapFeedback(): void {
     if (!this.model || !this.tapFeedback) {
       return;

@@ -1,39 +1,41 @@
 import * as PIXI from 'pixi.js';
-import { getPixiApplicationOptions } from './pixi-config';
+import { install as installPixiUnsafeEval } from '@pixi/unsafe-eval';
+import { mergeAssistantMessages, shouldContinueAssistantStream } from './assistantMessageStream';
+import { getPixiApplicationOptions } from './pixiConfig';
 import {
   getNextMenuOpenState,
   getWindowMenuItems,
   type WindowMenuActionId,
-} from './window-menu';
-import { getWindowChromeState } from './window-chrome';
+} from './windowMenu';
+import { getWindowChromeState } from './windowChrome';
 import {
   createDragSession,
   getWindowPositionForPointer,
   isValidWindowPosition,
   type DragSession,
-} from './window-drag';
-import { VoiceRecognitionController } from './voice/voice-recognition';
-import type { VoiceUiState } from './voice/voice-ui';
-
-const { ipcRenderer } = require('electron') as {
-  ipcRenderer: {
-    invoke(channel: 'window-drag:get-position'): Promise<[number, number]>;
-    invoke(channel: 'voice:transcribe', payload: { audioBuffer: ArrayBuffer; mimeType: string }): Promise<{ text: string }>;
-    send(channel: 'window-drag:set-position', nextX: number, nextY: number): void;
-  };
-};
+} from './windowDrag';
+import { VoiceRecognitionController } from './voice/voiceRecognition';
+import { PcmAudioPlayer } from './voice/pcmAudioPlayer';
+import type { VoiceUiState } from './voice/voiceUi';
+import type { SessionEvent, SessionSnapshot } from '../types/session';
+import type { UserSettings } from '../types/settings';
+import type { TaskRecord } from '../types/tasks';
 
 type Live2DManagerInstance = {
   loadModel(): Promise<void>;
   onTouch(position: PIXI.IPointData): void;
   refitModel(): void;
+  setSpeechLevel(level: number): void;
 };
 
 type Live2DModule = {
   Live2DManager: new (app: PIXI.Application) => Live2DManagerInstance;
 };
 
+(globalThis as typeof globalThis & { __CELCAT_DEBUG__?: boolean }).__CELCAT_DEBUG__ =
+  process.argv.includes('--dev');
 (window as typeof window & { PIXI?: typeof PIXI }).PIXI = PIXI;
+installPixiUnsafeEval(PIXI as unknown as { ShaderSystem: typeof PIXI.ShaderSystem });
 
 const { Live2DManager } = require('./live2d/live2d') as Live2DModule;
 
@@ -41,9 +43,15 @@ class DesktopCompanion {
   private app: PIXI.Application | null = null;
   private live2d: Live2DManagerInstance | null = null;
   private voiceRecognition: VoiceRecognitionController | null = null;
+  private assistantAudioPlayer = new PcmAudioPlayer(window);
   private menuOpen = false;
   private dragSession: DragSession | null = null;
   private hoveringWindow = false;
+  private activeTask: TaskRecord | null = null;
+  private providerAudioSeen = false;
+  private pendingAssistantStatusText = '';
+  private assistantStatusFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastAssistantStatusAt = 0;
 
   constructor() {
     void this.init();
@@ -81,6 +89,7 @@ class DesktopCompanion {
 
     this.setupWindowChrome();
     this.setupVoiceRecognition();
+    void this.bootstrapAssistant();
     const appRoot = document.getElementById('app');
     appRoot?.addEventListener('mouseenter', () => {
       this.hoveringWindow = true;
@@ -93,19 +102,23 @@ class DesktopCompanion {
     window.addEventListener('resize', () => {
       this.live2d?.refitModel();
     });
+    this.app?.ticker.add(() => {
+      this.live2d?.setSpeechLevel(this.assistantAudioPlayer.getCurrentLevel());
+    });
   }
 
   private setupWindowChrome(): void {
     const dragButton = document.getElementById('drag-button');
-    const voiceButton = document.getElementById('voice-button') as HTMLButtonElement | null;
     const menuButton = document.getElementById('menu-button') as HTMLButtonElement | null;
     const menu = document.getElementById('window-menu');
+    const menuActions = document.getElementById('window-menu-actions');
+    const autoExecuteToggle = document.getElementById('auto-execute-toggle') as HTMLInputElement | null;
 
-    if (!dragButton || !voiceButton || !menuButton || !menu) {
+    if (!dragButton || !menuButton || !menu || !menuActions) {
       return;
     }
 
-    menu.innerHTML = '';
+    menuActions.innerHTML = '';
     for (const item of getWindowMenuItems()) {
       const button = document.createElement('button');
       button.type = 'button';
@@ -116,14 +129,14 @@ class DesktopCompanion {
       button.addEventListener('click', () => {
         this.handleMenuAction(item.id);
       });
-      menu.appendChild(button);
+      menuActions.appendChild(button);
     }
 
     dragButton.addEventListener('pointerdown', async (event) => {
       event.preventDefault();
       event.stopPropagation();
 
-      const [windowX, windowY] = await ipcRenderer.invoke('window-drag:get-position');
+      const [windowX, windowY] = await window.electronAPI.windowDrag.getPosition();
       this.dragSession = createDragSession(
         { x: windowX, y: windowY },
         { x: event.screenX, y: event.screenY },
@@ -143,7 +156,7 @@ class DesktopCompanion {
       if (!isValidWindowPosition(nextPosition)) {
         return;
       }
-      ipcRenderer.send('window-drag:set-position', nextPosition.x, nextPosition.y);
+      window.electronAPI.windowDrag.setPosition(nextPosition.x, nextPosition.y);
     });
 
     const stopDragging = () => {
@@ -154,11 +167,6 @@ class DesktopCompanion {
     window.addEventListener('pointerup', stopDragging);
     window.addEventListener('blur', stopDragging);
 
-    voiceButton.addEventListener('click', (event) => {
-      event.stopPropagation();
-      this.voiceRecognition?.toggleListening();
-    });
-
     menuButton.addEventListener('click', (event) => {
       event.stopPropagation();
       this.setMenuOpen(getNextMenuOpenState(this.menuOpen, 'toggle'));
@@ -166,6 +174,12 @@ class DesktopCompanion {
 
     menu.addEventListener('click', (event) => {
       event.stopPropagation();
+    });
+    autoExecuteToggle?.addEventListener('change', async () => {
+      const nextSettings = await window.electronAPI.settings.update({
+        autoExecute: autoExecuteToggle.checked,
+      });
+      this.syncAutoExecuteSettings(nextSettings);
     });
 
     document.addEventListener('click', () => {
@@ -182,18 +196,13 @@ class DesktopCompanion {
 
   private setupVoiceRecognition(): void {
     this.voiceRecognition = new VoiceRecognitionController(
-      Object.assign(window as unknown as Record<string, unknown>, { ipcRenderer }),
+      window,
       {
-      onStateChange: (state) => {
-        this.syncVoiceUi(state);
+        onStateChange: (state) => {
+          this.syncVoiceUi(state);
+        },
       },
-      onDeviceListChange: (devices, selectedDeviceId) => {
-        this.syncVoiceDeviceOptions(devices, selectedDeviceId);
-      },
-      onFinalTranscript: (transcript) => {
-        console.log(`Voice transcript: ${transcript}`);
-      },
-    });
+    );
   }
 
   private handleMenuAction(action: WindowMenuActionId): void {
@@ -221,6 +230,105 @@ class DesktopCompanion {
     this.syncWindowChrome();
   }
 
+  private async bootstrapAssistant(): Promise<void> {
+    let sessionSnapshot: SessionSnapshot;
+
+    try {
+      [sessionSnapshot] = await Promise.all([
+        window.electronAPI.session.start(),
+      ]);
+    } catch (error: any) {
+      console.error('Session failed to start:', error);
+      sessionSnapshot = {
+        status: 'error',
+        connected: false,
+        lastTranscript: '',
+        lastAssistantMessage: '',
+        activeTaskId: null,
+        error: error?.message || '实时语音会话启动失败',
+      };
+      this.syncSessionSnapshot(sessionSnapshot);
+    }
+
+    const [tasks, settings] = await Promise.all([
+      window.electronAPI.tasks.list(),
+      window.electronAPI.settings.get(),
+    ]);
+
+    this.syncSessionSnapshot(sessionSnapshot);
+    this.syncTaskList(tasks);
+    this.syncAutoExecuteSettings(settings);
+
+    window.electronAPI.session.onEvent((event) => {
+      this.handleSessionEvent(event);
+    });
+    window.electronAPI.tasks.onUpdate((task) => {
+      this.handleTaskUpdate(task);
+    });
+  }
+
+  private handleSessionEvent(event: SessionEvent): void {
+    if (event.type === 'session-state') {
+      this.syncSessionSnapshot(event.snapshot);
+      return;
+    }
+
+    if (event.type === 'transcript') {
+      this.clearPendingAssistantStatus();
+      this.syncPrimaryStatus(`你刚刚说：${event.transcript}`, 'result');
+      return;
+    }
+
+    if (event.type === 'assistant-message') {
+      this.queueAssistantStatus(event.text);
+      return;
+    }
+
+    if (event.type === 'assistant-audio') {
+      this.providerAudioSeen = true;
+      window.speechSynthesis?.cancel?.();
+      void this.assistantAudioPlayer.play({
+        pcmBase64: event.pcmBase64,
+        sampleRate: event.sampleRate,
+        channels: event.channels,
+        format: event.format,
+      });
+      return;
+    }
+
+    if (event.type === 'error') {
+      this.clearPendingAssistantStatus();
+      this.syncPrimaryStatus(event.message, 'error');
+    }
+  }
+
+  private handleTaskUpdate(task: TaskRecord): void {
+    const activeTask = task.status === 'completed' || task.status === 'cancelled' || task.status === 'failed'
+      ? null
+      : task;
+
+    this.activeTask = activeTask ?? (this.activeTask?.id === task.id ? null : this.activeTask);
+    this.syncTaskStatus(task);
+  }
+
+  private syncSessionSnapshot(snapshot: SessionSnapshot): void {
+    if (snapshot.status === 'listening' && !snapshot.lastAssistantMessage && !snapshot.error) {
+      this.syncPrimaryStatus('我在听，也可以直接交给我一个后台任务。', 'idle');
+      return;
+    }
+
+    if (snapshot.status === 'processing') {
+      this.clearPendingAssistantStatus();
+      this.syncPrimaryStatus('我在整理你刚刚说的话。', 'processing');
+      return;
+    }
+
+    if (snapshot.status === 'error') {
+      this.clearPendingAssistantStatus();
+      this.syncPrimaryStatus(snapshot.error || '会话出了点问题。', 'error');
+    }
+  }
+
   private syncWindowChrome(): void {
     const chrome = document.getElementById('window-chrome');
     const chromeState = getWindowChromeState({
@@ -232,48 +340,131 @@ class DesktopCompanion {
   }
 
   private syncVoiceUi(state: VoiceUiState): void {
-    const voiceButton = document.getElementById('voice-button') as HTMLButtonElement | null;
-    const voiceStatus = document.getElementById('voice-status');
-
-    voiceButton?.setAttribute('aria-label', state.buttonLabel);
-    voiceButton?.setAttribute('title', state.buttonTitle);
-    voiceButton?.setAttribute('aria-pressed', String(state.listening));
-    voiceButton?.classList.toggle('is-listening', state.listening);
-    if (voiceButton) {
-      voiceButton.disabled = state.disabled;
-    }
-
-    if (!voiceStatus) {
+    if (state.statusTone !== 'error' || !state.showStatus) {
       return;
     }
 
-    voiceStatus.textContent = state.statusText;
-    voiceStatus.dataset.tone = state.statusTone;
-    voiceStatus.classList.toggle('is-visible', state.showStatus);
+    this.clearPendingAssistantStatus();
+    this.syncPrimaryStatus(state.statusText, 'error', true);
   }
 
-  private syncVoiceDeviceOptions(
-    devices: Array<{ id: string; label: string }>,
-    selectedDeviceId: string,
+  private syncPrimaryStatus(
+    text: string,
+    tone: 'idle' | 'processing' | 'speaking' | 'result' | 'error',
+    visible = Boolean(text),
   ): void {
-    const select = document.getElementById('voice-device-select') as HTMLSelectElement | null;
-
-    if (!select) {
+    const assistantStatus = document.getElementById('assistant-status');
+    if (!assistantStatus) {
       return;
     }
 
-    select.innerHTML = '';
-    for (const device of devices) {
-      const option = document.createElement('option');
-      option.value = device.id;
-      option.textContent = device.label;
-      option.selected = device.id === selectedDeviceId;
-      select.appendChild(option);
+    assistantStatus.textContent = text;
+    assistantStatus.dataset.tone = tone;
+    assistantStatus.classList.toggle('is-visible', visible);
+  }
+
+  private syncTaskList(tasks: TaskRecord[]): void {
+    const latestTask = tasks.find((task) => task.status === 'queued' || task.status === 'running' || task.status === 'waiting_user')
+      ?? tasks[0]
+      ?? null;
+
+    if (latestTask) {
+      this.activeTask = latestTask;
+      this.syncTaskStatus(latestTask);
+    }
+  }
+
+  private syncTaskStatus(task: TaskRecord | null): void {
+    const taskStatus = document.getElementById('task-status');
+    if (!taskStatus) {
+      return;
     }
 
-    select.onchange = () => {
-      this.voiceRecognition?.setSelectedDevice(select.value);
-    };
+    if (!task) {
+      taskStatus.textContent = '';
+      taskStatus.classList.remove('is-visible');
+      delete taskStatus.dataset.tone;
+      return;
+    }
+
+    taskStatus.textContent = `${task.title}：${task.progressSummary}`;
+    taskStatus.dataset.tone = task.status === 'completed'
+      ? 'completed'
+      : task.status === 'failed'
+        ? 'error'
+        : task.status === 'cancelled'
+          ? 'idle'
+          : 'running';
+    taskStatus.classList.add('is-visible');
+  }
+
+  private syncAutoExecuteSettings(settings: UserSettings): void {
+    const autoExecuteToggle = document.getElementById('auto-execute-toggle') as HTMLInputElement | null;
+    const autoExecuteHint = document.getElementById('auto-execute-hint');
+
+    if (autoExecuteToggle) {
+      autoExecuteToggle.checked = settings.autoExecute;
+    }
+
+    if (autoExecuteHint) {
+      autoExecuteHint.textContent = settings.autoExecute
+        ? '当前会自动执行中低风险任务。'
+        : '当前会先确认中高风险任务。';
+    }
+  }
+
+  private speakAssistantMessage(text: string): void {
+    if (!('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined') {
+      return;
+    }
+
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = 'zh-CN';
+    utterance.rate = 1;
+    utterance.pitch = 1;
+    window.speechSynthesis.speak(utterance);
+  }
+
+  private queueAssistantStatus(text: string): void {
+    const now = Date.now();
+    if (shouldContinueAssistantStream(this.lastAssistantStatusAt, now, this.pendingAssistantStatusText)) {
+      this.pendingAssistantStatusText = mergeAssistantMessages(this.pendingAssistantStatusText, text);
+    } else {
+      this.pendingAssistantStatusText = text.trim();
+    }
+
+    this.lastAssistantStatusAt = now;
+    if (this.assistantStatusFlushTimer) {
+      clearTimeout(this.assistantStatusFlushTimer);
+    }
+
+    this.assistantStatusFlushTimer = setTimeout(() => {
+      this.flushAssistantStatus();
+    }, 320);
+  }
+
+  private flushAssistantStatus(): void {
+    if (!this.pendingAssistantStatusText) {
+      this.assistantStatusFlushTimer = null;
+      return;
+    }
+
+    const text = this.pendingAssistantStatusText;
+    this.pendingAssistantStatusText = '';
+    this.assistantStatusFlushTimer = null;
+    this.syncPrimaryStatus(text, 'speaking');
+    if (!this.providerAudioSeen) {
+      this.speakAssistantMessage(text);
+    }
+  }
+
+  private clearPendingAssistantStatus(): void {
+    if (this.assistantStatusFlushTimer) {
+      clearTimeout(this.assistantStatusFlushTimer);
+      this.assistantStatusFlushTimer = null;
+    }
+    this.pendingAssistantStatusText = '';
   }
 
   private showFatalError(error: unknown): void {

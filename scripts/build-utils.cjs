@@ -11,6 +11,14 @@ function getStaticCopyPlan(projectRoot, distRoot) {
       to: path.join(distRoot, 'renderer', 'styles'),
     },
     {
+      from: path.join(projectRoot, 'src', 'renderer', 'bootstrap.js'),
+      to: path.join(distRoot, 'renderer', 'bootstrap.js'),
+    },
+    {
+      from: path.join(projectRoot, 'src', 'renderer', 'voice', 'audioFrameProcessor.js'),
+      to: path.join(distRoot, 'renderer', 'voice', 'audioFrameProcessor.js'),
+    },
+    {
       from: path.join(projectRoot, 'src', 'assets'),
       to: path.join(distRoot, 'assets'),
     },
