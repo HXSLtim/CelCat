@@ -1,6 +1,6 @@
 import type { SessionEvent, SessionSnapshot, StreamingAudioFrame, UserAudioPayload } from './session';
 import type { UserSettings } from './settings';
-import type { TaskRecord } from './tasks';
+import type { AgentCapabilityCatalogEntry, TaskRecord } from './tasks';
 import type { WindowStateEvent, WindowStateSnapshot } from './windowState';
 
 type Unsubscribe = () => void;
@@ -31,6 +31,9 @@ type ElectronApi = {
     cancel(taskId: string): Promise<TaskRecord | null>;
     approve(taskId: string): Promise<TaskRecord | null>;
     onUpdate(listener: (task: TaskRecord) => void): Unsubscribe;
+  };
+  agentCapabilities: {
+    list(): Promise<AgentCapabilityCatalogEntry[]>;
   };
   settings: {
     get(): Promise<UserSettings>;

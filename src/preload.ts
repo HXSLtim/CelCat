@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { SessionEvent, SessionSnapshot, StreamingAudioFrame, UserAudioPayload } from './types/session';
 import type { UserSettings } from './types/settings';
-import type { TaskRecord } from './types/tasks';
+import type { AgentCapabilityCatalogEntry, TaskRecord } from './types/tasks';
 import type { WindowStateEvent, WindowStateSnapshot } from './types/windowState';
 
 function subscribe<EventPayload>(
@@ -79,6 +79,11 @@ const electronApi = {
     },
     onUpdate(listener: (task: TaskRecord) => void): () => void {
       return subscribe('task:event', listener);
+    },
+  },
+  agentCapabilities: {
+    list(): Promise<AgentCapabilityCatalogEntry[]> {
+      return ipcRenderer.invoke('agent-capabilities:list');
     },
   },
   settings: {

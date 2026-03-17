@@ -11,6 +11,8 @@ import {
   buildTaskRequestFrame,
   parseRealtimeResponse,
 } from './protocol';
+import type { CompanionIdentityProfile } from '../agent/agentMemoryStore';
+import type { TaskKind } from '../../types/tasks';
 
 type PendingReply = {
   resolve: (value: string | null) => void;
@@ -19,13 +21,32 @@ type PendingReply = {
   textParts: string[];
 };
 
-type ProviderEvent =
+export type CompanionToolCall = {
+  name: string;
+  arguments: Record<string, unknown>;
+  rawText?: string;
+};
+
+export type CompanionToolExecutionResult = {
+  toolName: string;
+  assistantMessage: string | null;
+  relatedTaskId: string | null;
+  syncCompanionIdentity: string | null;
+};
+
+export type CompanionReplyPayload = {
+  message: string | null;
+  toolCall: CompanionToolCall | null;
+};
+
+export type ProviderEvent =
   | { type: 'transcript'; text: string }
   | { type: 'assistant-message'; text: string; isFinal?: boolean }
   | { type: 'assistant-audio'; pcmBase64: string; sampleRate: number; channels: number; format: 'pcm_s16le' }
+  | { type: 'tool-call'; toolName: string; arguments: Record<string, unknown>; rawText?: string }
   | { type: 'error'; message: string };
 
-type VolcengineRealtimeConfig = {
+export type VolcengineRealtimeConfig = {
   enabled: boolean;
   address: string;
   uri: string;
@@ -53,10 +74,13 @@ export type CompanionProvider = {
   disconnect(): Promise<void>;
   startSession(): Promise<void>;
   generateReply(input: string): Promise<string | null>;
+  generateReplyPayload?(input: string): Promise<CompanionReplyPayload>;
   appendInputAudioFrame(frame: { pcmBase64: string; sampleRate: number; channels: number }): Promise<void>;
   commitInputAudio(): Promise<void>;
   isEnabled(): boolean;
   setEventSink(listener: ((event: ProviderEvent) => void) | null): void;
+  syncCompanionIdentity(identity: Pick<CompanionIdentityProfile, 'displayName'>): Promise<void>;
+  executeToolCall?(toolCall: CompanionToolCall): Promise<CompanionToolExecutionResult | null>;
 };
 
 export function readVolcengineRealtimeConfig(env: NodeJS.ProcessEnv): VolcengineRealtimeConfig {
@@ -113,6 +137,7 @@ export class VolcengineRealtimeProviderClient implements CompanionProvider {
   private hasCommittedUserAudio = false;
   private sessionStarted = false;
   private inputAudioReady = false;
+  private runtimeBotName: string;
   private connectId = randomUUID();
   private sessionId = randomUUID();
   private readonly pendingEventWaiters = new Map<number, Array<{
@@ -123,7 +148,9 @@ export class VolcengineRealtimeProviderClient implements CompanionProvider {
 
   constructor(
     private readonly config: VolcengineRealtimeConfig = readVolcengineRealtimeConfig(process.env),
-  ) {}
+  ) {
+    this.runtimeBotName = config.botName;
+  }
 
   isEnabled(): boolean {
     return this.config.enabled
@@ -135,6 +162,23 @@ export class VolcengineRealtimeProviderClient implements CompanionProvider {
 
   setEventSink(listener: ((event: ProviderEvent) => void) | null): void {
     this.eventSink = listener;
+  }
+
+  async syncCompanionIdentity(identity: Pick<CompanionIdentityProfile, 'displayName'>): Promise<void> {
+    const nextBotName = identity.displayName.trim() || this.config.botName;
+    if (!nextBotName || nextBotName === this.runtimeBotName) {
+      return;
+    }
+
+    logDebug('provider', 'Updating realtime companion identity', {
+      previousBotName: this.runtimeBotName,
+      nextBotName,
+    });
+    this.runtimeBotName = nextBotName;
+
+    if (this.socket || this.sessionStarted || this.inputAudioReady) {
+      await this.disconnect();
+    }
   }
 
   async connect(): Promise<void> {
@@ -444,11 +488,14 @@ export class VolcengineRealtimeProviderClient implements CompanionProvider {
     });
 
     logDebug('provider', 'Sending StartSession frame', {
-      botName: this.config.botName,
+      botName: this.runtimeBotName,
       uid: this.config.uid,
       sessionId: this.sessionId,
     });
-    this.sendMessage(buildStartSessionFrame(this.sessionId, createStartSessionPayload(this.config)), 'StartSession');
+    this.sendMessage(
+      buildStartSessionFrame(this.sessionId, createStartSessionPayload(this.config, this.runtimeBotName)),
+      'StartSession',
+    );
     await this.waitForProviderEvent(150, 4000).catch(() => {
       logDebug('provider', 'StartSession acknowledgement timed out; continuing');
     });
@@ -460,7 +507,7 @@ export class VolcengineRealtimeProviderClient implements CompanionProvider {
 
     logDebug('provider', 'Sending SayHello frame');
     this.sendMessage(
-      buildSayHelloFrame(this.sessionId, '你好，我是豆包，有什么可以帮助你的？'),
+      buildSayHelloFrame(this.sessionId, `你好，我是${this.runtimeBotName}，有什么可以帮助你的？`),
       'SayHello',
     );
     await this.waitForProviderEvent(359, 12000).catch(() => {
@@ -677,7 +724,11 @@ function parseHeadersJson(raw: string): Record<string, string> {
   }
 }
 
-function createStartSessionPayload(config: VolcengineRealtimeConfig): Record<string, unknown> {
+function createStartSessionPayload(
+  config: VolcengineRealtimeConfig,
+  botNameOverride?: string,
+): Record<string, unknown> {
+  const botName = botNameOverride?.trim() || config.botName;
   return {
     asr: {
       extra: {
@@ -693,8 +744,8 @@ function createStartSessionPayload(config: VolcengineRealtimeConfig): Record<str
       },
     },
     dialog: {
-      bot_name: config.botName,
-      system_role: config.systemRole,
+      bot_name: botName,
+      system_role: `${config.systemRole} 你的当前名字是“${botName}”，和用户对话时请稳定使用这个名字进行自称。`,
       speaking_style: config.speakingStyle,
       location: {
         city: '北京',

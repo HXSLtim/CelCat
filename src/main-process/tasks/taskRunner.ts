@@ -5,6 +5,8 @@ import type { AgentWorkspace, AgentWorkspaceStep } from '../../types/tasks';
 import { executeWorkspaceStep } from '../agent/agentCapabilityExecutor';
 import { compressWorkspaceContext } from '../agent/contextCompressor';
 import { AgentMemoryStore } from '../agent/agentMemoryStore';
+import { replanWorkspaceAfterStep } from '../agent/agentWorkspaceReplanner';
+import { synthesizeWorkspaceOutcome } from '../agent/workspaceOutcomeSynthesizer';
 
 type RunTaskInput = {
   kind: TaskKind;
@@ -129,10 +131,15 @@ export class TaskRunner {
       }
 
       const shouldWaitForUser = workspace.requiresConfirmation && !input.autoExecute;
+      const plannedOutcome = synthesizeWorkspaceOutcome(workspace);
       const plannedWorkspace = {
         ...workspace,
+        outcome: plannedOutcome,
         mode: shouldWaitForUser ? 'blocked' : 'executing',
-        compressedContext: this.compressWorkspace(taskId, workspace, {
+        compressedContext: this.compressWorkspace(taskId, {
+          ...workspace,
+          outcome: plannedOutcome,
+        }, {
           status: shouldWaitForUser ? 'waiting_user' : 'running',
           progressSummary: shouldWaitForUser
             ? '工作区计划已生成，等待你确认后再继续执行。'
@@ -204,33 +211,55 @@ export class TaskRunner {
         workspace,
         step: workspace.steps[index],
       });
+      const observedWorkspace = replanWorkspaceAfterStep({
+        workspace: executionResult.workspace,
+        stepIndex: index,
+        executionResult,
+      });
+      const observedOutcome = synthesizeWorkspaceOutcome(observedWorkspace);
       workspace = {
-        ...executionResult.workspace,
-        compressedContext: this.compressWorkspace(taskId, executionResult.workspace, {
+        ...observedWorkspace,
+        outcome: observedOutcome,
+        compressedContext: this.compressWorkspace(taskId, {
+          ...observedWorkspace,
+          outcome: observedOutcome,
+        }, {
           status: 'running',
-          progressSummary: executionResult.progressSummary || executionResult.workspace.steps[index]?.summary || 'Agent 正在推进任务。',
+          progressSummary: executionResult.progressSummary || observedWorkspace.steps[index]?.summary || 'Agent 正在推进任务。',
         }),
       };
 
+      const workspaceResultSummary = this.composeResultSummary(input, workspace);
       this.taskStore.update(taskId, {
         progressSummary: executionResult.progressSummary || workspace.steps[index]?.summary || 'Agent 正在推进任务。',
         internalDetail: `Running workspace step ${index + 1}/${workspace.steps.length}`,
+        resultSummary: workspaceResultSummary,
         workspace,
       });
 
       await this.wait(taskId, this.getStepDelay(workspace.steps[index]), timers);
     }
 
-    const completedWorkspace = {
+    const completedSteps: AgentWorkspaceStep[] = workspace.steps.map((step) => ({
+      ...step,
+      status: step.status === 'blocked' ? 'blocked' : 'completed',
+    }));
+    const completedOutcome = synthesizeWorkspaceOutcome({
       ...workspace,
       mode: 'completed',
-      steps: workspace.steps.map((step) => ({
-        ...step,
-        status: step.status === 'blocked' ? 'blocked' : 'completed',
-      })),
+      steps: completedSteps,
+    });
+    const completedWorkspace = {
+      ...workspace,
+      outcome: completedOutcome,
+      mode: 'completed',
+      steps: completedSteps,
     } satisfies AgentWorkspace;
 
-    const resultSummary = this.getResultSummary(input.kind, input.transcript);
+    const resultSummary = this.composeResultSummary(
+      input,
+      completedWorkspace,
+    );
     const existingTask = this.taskStore.get(taskId);
     const completedTaskPreview: TaskRecord = {
       ...(existingTask ?? {
@@ -259,6 +288,31 @@ export class TaskRunner {
         memoryRefs: [],
       },
     }) ?? [];
+    if (completedOutcome.status === 'needs_attention') {
+      const blockedWorkspace = {
+        ...completedWorkspace,
+        mode: 'blocked',
+        compressedContext,
+        memoryRefs,
+      } satisfies AgentWorkspace;
+      this.pendingExecutions.set(taskId, {
+        input,
+        workspace: blockedWorkspace,
+      });
+      this.taskStore.setStatus(taskId, 'waiting_user', {
+        progressSummary: '工作区发现阻塞项，等待你处理后再继续执行。',
+        internalDetail: 'Workspace finished current pass but is blocked by warnings',
+        resultSummary,
+        resultPayload: {
+          completedSteps: blockedWorkspace.steps.length,
+          skills: blockedWorkspace.skills.map((skill) => skill.label),
+          mcps: blockedWorkspace.mcps.map((mcp) => mcp.label),
+          outcome: blockedWorkspace.outcome,
+        },
+        workspace: blockedWorkspace,
+      });
+      return;
+    }
 
     this.taskStore.setStatus(taskId, 'completed', {
       progressSummary: '任务已完成，工作区结果已经整理好了。',
@@ -268,6 +322,7 @@ export class TaskRunner {
         completedSteps: completedWorkspace.steps.length,
         skills: completedWorkspace.skills.map((skill) => skill.label),
         mcps: completedWorkspace.mcps.map((mcp) => mcp.label),
+        outcome: completedWorkspace.outcome,
       },
       workspace: {
         ...completedWorkspace,
@@ -358,5 +413,30 @@ export class TaskRunner {
     };
 
     return compressWorkspaceContext(taskPreview);
+  }
+
+  private composeResultSummary(
+    input: RunTaskInput,
+    workspace: AgentWorkspace,
+  ): string {
+    const fallbackSummary = this.getResultSummary(input.kind, input.transcript);
+    if (!workspace.outcome) {
+      return fallbackSummary;
+    }
+
+    const summaryLines = [
+      workspace.outcome.summary,
+      workspace.outcome.highlights.length
+        ? `亮点：${workspace.outcome.highlights.join('；')}`
+        : '',
+      workspace.outcome.blockers.length
+        ? `阻塞：${workspace.outcome.blockers.join('；')}`
+        : '',
+      workspace.outcome.nextActions.length
+        ? `下一步：${workspace.outcome.nextActions.join('；')}`
+        : '',
+    ].filter(Boolean);
+
+    return summaryLines.length ? summaryLines.join('\n') : fallbackSummary;
   }
 }

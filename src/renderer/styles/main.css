@@ -464,6 +464,10 @@ body.is-fullscreen #app::before {
   font: 500 13px/1.55 'Segoe UI', sans-serif;
 }
 
+#workspace-result {
+  white-space: pre-wrap;
+}
+
 .workspace-section {
   display: grid;
   gap: 8px;
@@ -491,14 +495,29 @@ body.is-fullscreen #app::before {
   border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
+.workspace-chip[data-source='skill'] {
+  border-color: rgba(120, 203, 255, 0.18);
+}
+
+.workspace-chip[data-source='mcp'] {
+  border-color: rgba(255, 207, 120, 0.18);
+}
+
 .workspace-chip-label {
   color: rgba(255, 255, 255, 0.96);
   font: 600 12px/1.2 'Segoe UI', sans-serif;
 }
 
+.workspace-chip-meta,
 .workspace-chip-reason {
   color: rgba(255, 255, 255, 0.62);
   font: 500 11px/1.45 'Segoe UI', sans-serif;
+}
+
+.workspace-chip-meta {
+  color: rgba(255, 255, 255, 0.48);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .workspace-step {

@@ -2,6 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { resolveCapabilityDefinitionById } from './agentCapabilityCatalog';
+import { executeExternalCapability } from './externalCapabilityBridge';
+import { prepareSkillExecution } from './skillInvocationAdapter';
 import type {
   AgentWorkspace,
   AgentWorkspaceArtifact,
@@ -20,9 +23,11 @@ type ExecuteStepInput = {
   projectRoot?: string;
 };
 
-type ExecuteStepResult = {
+export type ExecuteStepResult = {
   workspace: AgentWorkspace;
   progressSummary?: string;
+  observation?: string;
+  artifactTone?: AgentWorkspaceArtifact['tone'];
 };
 
 export async function executeWorkspaceStep(
@@ -30,11 +35,17 @@ export async function executeWorkspaceStep(
 ): Promise<ExecuteStepResult> {
   const projectRoot = input.projectRoot || process.cwd();
   const step = input.step;
+  const capability = step.capabilityId
+    ? resolveCapabilityDefinitionById(step.capabilityId, { cwd: projectRoot })
+    : null;
 
   if (step.capabilityId === 'filesystem') {
+    const artifact = await buildFilesystemArtifact(projectRoot);
     return {
-      workspace: appendWorkspaceArtifact(input.workspace, await buildFilesystemArtifact(projectRoot)),
+      workspace: appendWorkspaceArtifact(input.workspace, artifact),
       progressSummary: '已读取工作区文件结构和项目脚本。',
+      observation: deriveObservationFromArtifact(step, artifact, '已拿到工程目录和脚本概览。'),
+      artifactTone: artifact.tone,
     };
   }
 
@@ -49,16 +60,121 @@ export async function executeWorkspaceStep(
       progressSummary: artifact.tone === 'success'
         ? '已完成命令执行并整理终端结果。'
         : '已整理终端能力结果。',
+      observation: deriveObservationFromArtifact(
+        step,
+        artifact,
+        artifact.tone === 'success' ? '命令执行已完成。' : '命令执行出现告警。',
+      ),
+      artifactTone: artifact.tone,
+    };
+  }
+
+  if (step.capabilityType === 'mcp' && capability?.command) {
+    const externalResult = await executeExternalCapability({
+      capability,
+      transcript: input.transcript,
+      step,
+      autoExecute: input.autoExecute,
+      projectRoot,
+    });
+    return {
+      workspace: appendWorkspaceArtifact(input.workspace, externalResult.artifact),
+      progressSummary: externalResult.progressSummary,
+      observation: deriveObservationFromArtifact(step, externalResult.artifact, externalResult.progressSummary),
+      artifactTone: externalResult.artifact.tone,
     };
   }
 
   if (step.capabilityType === 'skill') {
+    if (capability?.command) {
+      const preparedSkill = prepareSkillExecution({
+        capability,
+        transcript: input.transcript,
+        step,
+        projectRoot,
+      });
+
+      if (preparedSkill.mode === 'fallback') {
+        const fallbackArtifact: AgentWorkspaceArtifact = {
+          id: `${capability.id}SkillFallback`,
+          label: `${capability.label} Skill`,
+          content: [
+            preparedSkill.reason,
+            capability.originPath ? `目录：${capability.originPath}` : '',
+            capability.description ? `描述：${capability.description}` : '',
+          ].filter(Boolean).join('\n'),
+          tone: 'warning',
+        };
+
+        return {
+          workspace: appendWorkspaceArtifact(
+            appendWorkspaceNote(
+              input.workspace,
+              preparedSkill.note || buildCapabilityExecutionNote('skill', capability, step),
+            ),
+            fallbackArtifact,
+          ),
+          progressSummary: `${capability.label} 当前未满足自动执行条件，已保留技能信息。`,
+          observation: deriveObservationFromArtifact(
+            step,
+            fallbackArtifact,
+            `${capability.label} 需要补充输入或改用更合适的执行方式。`,
+          ),
+          artifactTone: fallbackArtifact.tone,
+        };
+      }
+
+      const externalResult = await executeExternalCapability({
+        capability,
+        transcript: input.transcript,
+        step,
+        autoExecute: input.autoExecute,
+        projectRoot,
+        invocationOverride: preparedSkill,
+      });
+      return {
+        workspace: appendWorkspaceNote(
+          appendWorkspaceArtifact(input.workspace, externalResult.artifact),
+          preparedSkill.note || buildCapabilityExecutionNote('skill', capability, step),
+        ),
+        progressSummary: externalResult.progressSummary,
+        observation: deriveObservationFromArtifact(step, externalResult.artifact, externalResult.progressSummary),
+        artifactTone: externalResult.artifact.tone,
+      };
+    }
+
+    if (capability?.originPath) {
+      const artifact = {
+        id: `${capability.id}Profile`,
+        label: `${capability.label} Profile`,
+        content: [
+          `目录：${capability.originPath}`,
+          capability.description ? `描述：${capability.description}` : '',
+          `当前步骤：${step.summary}`,
+        ].filter(Boolean).join('\n'),
+        tone: 'info',
+      } satisfies AgentWorkspaceArtifact;
+      return {
+        workspace: appendWorkspaceArtifact(
+          appendWorkspaceNote(
+            input.workspace,
+            buildCapabilityExecutionNote('skill', capability, step),
+          ),
+          artifact,
+        ),
+        progressSummary: `已装载 ${capability.label} 的技能画像。`,
+        observation: deriveObservationFromArtifact(step, artifact, `已载入 ${capability.label} 的技能信息。`),
+        artifactTone: artifact.tone,
+      };
+    }
+
     return {
       workspace: appendWorkspaceNote(
         input.workspace,
-        `Skill ${step.capabilityId || step.title} 已纳入执行上下文：${step.summary}`,
+        buildCapabilityExecutionNote('skill', capability, step),
       ),
       progressSummary: `已完成 ${step.title} 的策略整理。`,
+      observation: `${step.title} 已完成策略整理。`,
     };
   }
 
@@ -66,9 +182,10 @@ export async function executeWorkspaceStep(
     return {
       workspace: appendWorkspaceNote(
         input.workspace,
-        `MCP ${step.capabilityId || step.title} 已参与任务执行：${step.summary}`,
+        buildCapabilityExecutionNote('mcp', capability, step),
       ),
       progressSummary: `已推进 ${step.title}。`,
+      observation: `${step.title} 已推进，当前以执行上下文整理为主。`,
     };
   }
 
@@ -78,6 +195,7 @@ export async function executeWorkspaceStep(
       `步骤「${step.title}」已推进：${step.summary}`,
     ),
     progressSummary: step.summary,
+    observation: `${step.title} 已推进。${step.summary}`,
   };
 }
 
@@ -194,4 +312,65 @@ function compactTerminalOutput(output: string, maxLength = 640): string {
   }
 
   return `${normalized.slice(0, maxLength - 3)}...`;
+}
+
+function buildCapabilityExecutionNote(
+  capabilityType: 'skill' | 'mcp',
+  capability: ReturnType<typeof resolveCapabilityDefinitionById>,
+  step: AgentWorkspaceStep,
+): string {
+  if (!capability) {
+    return `${capabilityType === 'mcp' ? 'MCP' : 'Skill'} ${step.capabilityId || step.title} 已纳入执行上下文：${step.summary}`;
+  }
+
+  const sourceDetail = capability.source === 'skill'
+    ? capability.command
+      ? `${capability.command}${capability.args?.length ? ` ${capability.args.join(' ')}` : ''}`
+      : capability.originPath || '本机技能目录'
+    : capability.command
+      ? `${capability.command}${capability.args?.length ? ` ${capability.args.join(' ')}` : ''}`
+      : '内置能力';
+
+  return [
+    `${capabilityType === 'mcp' ? 'MCP' : 'Skill'} ${capability.label} 已纳入执行上下文。`,
+    `用途：${capability.defaultReason}`,
+    `来源：${sourceDetail}`,
+    `当前步骤：${step.summary}`,
+  ].join(' ');
+}
+
+function deriveObservationFromArtifact(
+  step: AgentWorkspaceStep,
+  artifact: AgentWorkspaceArtifact,
+  fallback: string,
+): string {
+  const focusLine = extractArtifactFocusLine(artifact.content);
+  if (!focusLine) {
+    return fallback;
+  }
+
+  return compactTerminalOutput(`${step.title}：${focusLine}`, 180);
+}
+
+function extractArtifactFocusLine(content: string): string {
+  const lines = content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) =>
+      !/^命令[:：]/.test(line)
+      && !/^状态[:：]/.test(line)
+      && !/^stdout[:：]?$/i.test(line)
+      && !/^stderr[:：]?$/i.test(line)
+      && !/^目录[:：]/.test(line)
+      && !/^描述[:：]/.test(line)
+      && !/^当前步骤[:：]/.test(line),
+    );
+
+  if (!lines.length) {
+    return '';
+  }
+
+  const preferred = lines.find((line) => !/^[{\[]/.test(line)) || lines[0];
+  return preferred.length > 140 ? `${preferred.slice(0, 137)}...` : preferred;
 }

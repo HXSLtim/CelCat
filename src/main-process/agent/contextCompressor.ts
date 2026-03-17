@@ -18,6 +18,7 @@ export function compressWorkspaceContext(task: TaskRecord): string {
     ...workspace.skills.map((skill) => `skill:${skill.label}`),
     ...workspace.mcps.map((mcp) => `mcp:${mcp.label}`),
   ].slice(0, 6);
+  const outcome = workspace.outcome;
 
   return [
     `Mission: ${workspace.mission}`,
@@ -26,6 +27,8 @@ export function compressWorkspaceContext(task: TaskRecord): string {
     completedSteps.length ? `Completed: ${completedSteps.join(' -> ')}` : '',
     activeStep ? `Current: ${activeStep.title} - ${activeStep.summary}` : '',
     artifactSummary.length ? `Artifacts: ${artifactSummary.join(' | ')}` : '',
+    outcome ? `Outcome: ${outcome.status} @ ${Math.round(outcome.confidence * 100)}%` : '',
+    outcome?.blockers.length ? `Blockers: ${outcome.blockers.join(' | ')}` : '',
     task.resultSummary ? `Result: ${compactText(task.resultSummary, 140)}` : '',
   ]
     .filter(Boolean)

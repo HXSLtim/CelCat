@@ -1,14 +1,39 @@
 import type { SessionEvent, SessionSnapshot, StreamingAudioFrame, UserAudioPayload } from '../../types/session';
 import { logDebug, truncateDebugText } from '../../shared/debugLogger';
 import { ConversationOrchestrator } from '../orchestrator/conversationOrchestrator';
-import type { CompanionProvider } from './providerClient';
+import type { CompanionProvider, ProviderEvent } from './providerClient';
 
 type SessionManagerDependencies = {
   transcribeAudio(input: UserAudioPayload): Promise<{ text: string }>;
   orchestrator: ConversationOrchestrator;
   companionProvider: CompanionProvider;
   emitEvent(event: SessionEvent): void;
+  estimateSpeechDelayMs?(text: string): number;
 };
+
+type BufferedProviderEvent =
+  | {
+      type: 'assistant-message';
+      text: string;
+      isFinal?: boolean;
+    }
+  | {
+      type: 'assistant-audio';
+      pcmBase64: string;
+      sampleRate: number;
+      channels: number;
+      format: 'pcm_s16le';
+    }
+  | {
+      type: 'tool-call';
+      toolName: string;
+      arguments: Record<string, unknown>;
+      rawText?: string;
+    }
+  | {
+      type: 'error';
+      message: string;
+    };
 
 const DEFAULT_SNAPSHOT: SessionSnapshot = {
   status: 'idle',
@@ -23,6 +48,23 @@ export class SessionManager {
   private snapshot: SessionSnapshot = DEFAULT_SNAPSHOT;
   private totalForwardedAudioFrames = 0;
   private forwardedFramesSinceLastCommit = 0;
+  private lastSyncedCompanionDisplayName: string | null = null;
+  private pendingCompanionIdentitySync: {
+    displayName: string;
+    timer: ReturnType<typeof setTimeout>;
+  } | null = null;
+  private suppressedProviderReply: {
+    transcript: string;
+    startedAt: number;
+    reason: string;
+  } | null = null;
+  private pendingProviderTurn: {
+    id: number;
+    transcript: string;
+    startedAt: number;
+    bufferedEvents: BufferedProviderEvent[];
+  } | null = null;
+  private pendingProviderTurnId = 0;
 
   constructor(private readonly dependencies: SessionManagerDependencies) {
     logDebug('session', 'Registering realtime provider event sink');
@@ -53,6 +95,7 @@ export class SessionManager {
       return this.getSnapshot();
     }
 
+    await this.syncCompanionIdentityImmediately();
     await this.dependencies.companionProvider.connect();
     await this.dependencies.companionProvider.startSession();
 
@@ -68,6 +111,7 @@ export class SessionManager {
 
   async stopSession(): Promise<SessionSnapshot> {
     logDebug('session', 'Stopping session');
+    this.clearPendingCompanionIdentitySync();
     await this.dependencies.companionProvider.disconnect();
     this.snapshot = {
       ...DEFAULT_SNAPSHOT,
@@ -159,16 +203,9 @@ export class SessionManager {
     });
   }
 
-  private handleProviderEvent(event: {
-    type: 'transcript' | 'assistant-message' | 'assistant-audio' | 'error';
-    text?: string;
-    isFinal?: boolean;
-    message?: string;
-    pcmBase64?: string;
-    sampleRate?: number;
-    channels?: number;
-    format?: 'pcm_s16le';
-  }): void {
+  private handleProviderEvent(event: ProviderEvent): void {
+    const eventText = 'text' in event ? event.text : undefined;
+    const eventMessage = 'message' in event ? event.message : undefined;
     if (
       event.type === 'transcript'
       || event.type === 'error'
@@ -176,11 +213,15 @@ export class SessionManager {
     ) {
       logDebug('session', 'Received provider event', {
         type: event.type,
-        text: event.text ? truncateDebugText(event.text) : undefined,
-        message: event.message,
+        text: eventText ? truncateDebugText(eventText) : undefined,
+        message: eventMessage,
       });
     }
     if (event.type === 'transcript' && event.text) {
+      if (this.pendingProviderTurn) {
+        this.flushBufferedProviderTurn('superseded-by-new-transcript');
+      }
+
       this.setSnapshot({
         lastTranscript: event.text,
       });
@@ -188,10 +229,41 @@ export class SessionManager {
         type: 'transcript',
         transcript: event.text,
       });
+      const turnId = ++this.pendingProviderTurnId;
+      this.pendingProviderTurn = {
+        id: turnId,
+        transcript: event.text,
+        startedAt: Date.now(),
+        bufferedEvents: [],
+      };
+      void this.handleRealtimeProviderTranscript(event.text, turnId);
       return;
     }
 
     if (event.type === 'assistant-message' && event.text) {
+      const bufferedEvent: BufferedProviderEvent = {
+        type: 'assistant-message',
+        text: event.text,
+        isFinal: event.isFinal,
+      };
+      if (this.shouldBufferProviderEvent(bufferedEvent)) {
+        this.pendingProviderTurn?.bufferedEvents.push(bufferedEvent);
+        return;
+      }
+
+      if (this.isProviderReplySuppressed()) {
+        logDebug('session', 'Suppressing provider assistant message because local orchestrator already took over', {
+          transcript: truncateDebugText(this.suppressedProviderReply?.transcript || '', 200),
+          reason: this.suppressedProviderReply?.reason || 'unknown',
+          text: truncateDebugText(event.text, 200),
+          isFinal: event.isFinal,
+        });
+        if (event.isFinal !== false) {
+          this.clearProviderReplySuppression();
+        }
+        return;
+      }
+
       this.setSnapshot({
         status: 'speaking',
         lastAssistantMessage: event.text,
@@ -210,6 +282,31 @@ export class SessionManager {
       return;
     }
 
+    if (event.type === 'tool-call') {
+      const bufferedEvent: BufferedProviderEvent = {
+        type: 'tool-call',
+        toolName: event.toolName,
+        arguments: event.arguments,
+        rawText: event.rawText,
+      };
+      if (this.shouldBufferProviderEvent(bufferedEvent)) {
+        this.pendingProviderTurn?.bufferedEvents.push(bufferedEvent);
+        return;
+      }
+
+      if (this.isProviderReplySuppressed()) {
+        logDebug('session', 'Suppressing provider tool call because local orchestrator already took over', {
+          transcript: truncateDebugText(this.suppressedProviderReply?.transcript || '', 200),
+          reason: this.suppressedProviderReply?.reason || 'unknown',
+          toolName: event.toolName,
+        });
+        return;
+      }
+
+      void this.handleProviderToolCall(event);
+      return;
+    }
+
     if (
       event.type === 'assistant-audio'
       && event.pcmBase64
@@ -217,6 +314,22 @@ export class SessionManager {
       && event.channels
       && event.format
     ) {
+      const bufferedEvent: BufferedProviderEvent = {
+        type: 'assistant-audio',
+        pcmBase64: event.pcmBase64,
+        sampleRate: event.sampleRate,
+        channels: event.channels,
+        format: event.format,
+      };
+      if (this.shouldBufferProviderEvent(bufferedEvent)) {
+        this.pendingProviderTurn?.bufferedEvents.push(bufferedEvent);
+        return;
+      }
+
+      if (this.isProviderReplySuppressed()) {
+        return;
+      }
+
       this.dependencies.emitEvent({
         type: 'assistant-audio',
         pcmBase64: event.pcmBase64,
@@ -228,6 +341,15 @@ export class SessionManager {
     }
 
     if (event.type === 'error' && event.message) {
+      const bufferedEvent: BufferedProviderEvent = {
+        type: 'error',
+        message: event.message,
+      };
+      if (this.shouldBufferProviderEvent(bufferedEvent)) {
+        this.pendingProviderTurn?.bufferedEvents.push(bufferedEvent);
+        return;
+      }
+
       this.setSnapshot({
         status: 'error',
         error: event.message,
@@ -239,7 +361,57 @@ export class SessionManager {
     }
   }
 
+  private async handleRealtimeProviderTranscript(transcript: string, turnId: number): Promise<void> {
+    await this.flushPendingCompanionIdentitySync();
+    const conversation = await this.dependencies.orchestrator.handleRealtimeProviderTranscript?.(transcript);
+    if (!this.pendingProviderTurn || this.pendingProviderTurn.id !== turnId) {
+      return;
+    }
+
+    if (!conversation) {
+      this.flushBufferedProviderTurn('no-local-takeover');
+      return;
+    }
+
+    logDebug('session', 'Realtime provider transcript was intercepted by local orchestrator', {
+      transcript: truncateDebugText(transcript, 200),
+      hasRelatedTask: Boolean(conversation.relatedTask),
+      eventCount: conversation.events.length,
+    });
+
+    this.suppressedProviderReply = {
+      transcript,
+      startedAt: Date.now(),
+      reason: conversation.relatedTask ? 'background-task' : 'local-control-intent',
+    };
+    this.pendingProviderTurn = null;
+
+    if (conversation.relatedTask) {
+      this.setSnapshot({
+        activeTaskId: conversation.relatedTask.id,
+      });
+    }
+
+    for (const localEvent of conversation.events) {
+      if (localEvent.type === 'assistant-message') {
+        this.setSnapshot({
+          status: 'speaking',
+          lastAssistantMessage: localEvent.text,
+          activeTaskId: localEvent.relatedTaskId ?? this.snapshot.activeTaskId,
+        });
+      }
+      this.dependencies.emitEvent(localEvent);
+    }
+    this.queueCompanionIdentitySyncFromConversation(conversation.events);
+
+    this.setSnapshot({
+      status: 'listening',
+      error: '',
+    });
+  }
+
   private async handleTranscript(transcript: string): Promise<void> {
+    await this.flushPendingCompanionIdentitySync();
     logDebug('session', 'Handling transcript', {
       transcript: truncateDebugText(transcript),
     });
@@ -270,11 +442,34 @@ export class SessionManager {
 
     if (conversation.companionRequest) {
       let reply = conversation.companionRequest.fallbackText;
+      let providerToolCall: {
+        name: string;
+        arguments: Record<string, unknown>;
+        rawText?: string;
+      } | null = null;
 
       if (this.dependencies.companionProvider.isEnabled()) {
         try {
-          reply = await this.dependencies.companionProvider.generateReply(conversation.companionRequest.prompt)
-            || conversation.companionRequest.fallbackText;
+          await this.syncCompanionIdentityImmediately();
+          if (this.dependencies.companionProvider.generateReplyPayload) {
+            const replyPayload = await this.dependencies.companionProvider.generateReplyPayload(
+              conversation.companionRequest.prompt,
+            );
+            providerToolCall = replyPayload.toolCall;
+            reply = replyPayload.message || conversation.companionRequest.fallbackText;
+            logDebug('session', 'Received structured realtime provider reply payload', {
+              transcript: truncateDebugText(transcript, 200),
+              reply: replyPayload.message ? truncateDebugText(replyPayload.message, 320) : null,
+              toolCall: providerToolCall?.name || null,
+            });
+          } else {
+            reply = await this.dependencies.companionProvider.generateReply(conversation.companionRequest.prompt)
+              || conversation.companionRequest.fallbackText;
+            logDebug('session', 'Received realtime provider reply for companion prompt', {
+              transcript: truncateDebugText(transcript, 200),
+              reply: truncateDebugText(reply, 320),
+            });
+          }
         } catch (error: any) {
           logDebug('session', 'Realtime provider reply failed, falling back to local companion reply', {
             message: error?.message || 'unknown error',
@@ -283,6 +478,49 @@ export class SessionManager {
         }
       } else {
         logDebug('session', 'Realtime provider unavailable, using local companion reply');
+      }
+
+      if (providerToolCall) {
+        await this.handleProviderToolCall({
+          type: 'tool-call',
+          toolName: providerToolCall.name,
+          arguments: providerToolCall.arguments,
+          rawText: providerToolCall.rawText,
+        });
+        this.setSnapshot({
+          status: 'listening',
+          error: '',
+        });
+        return;
+      }
+
+      const handoffResult = this.dependencies.orchestrator.resolveCompanionReply?.(transcript, reply) ?? null;
+      if (handoffResult) {
+        logDebug('session', 'Resolved companion reply into background agent handoff', {
+          transcript: truncateDebugText(transcript, 200),
+          relatedTaskId: handoffResult.relatedTask?.id ?? null,
+        });
+        if (handoffResult.relatedTask) {
+          this.setSnapshot({
+            activeTaskId: handoffResult.relatedTask.id,
+          });
+        }
+
+        for (const event of handoffResult.events) {
+          if (event.type === 'assistant-message') {
+            this.setSnapshot({
+              lastAssistantMessage: event.text,
+              activeTaskId: event.relatedTaskId ?? this.snapshot.activeTaskId,
+            });
+          }
+          this.dependencies.emitEvent(event);
+        }
+
+        this.setSnapshot({
+          status: 'listening',
+          error: '',
+        });
+        return;
       }
 
       this.setSnapshot({
@@ -306,6 +544,213 @@ export class SessionManager {
         });
       }
       this.dependencies.emitEvent(event);
+    }
+    this.queueCompanionIdentitySyncFromConversation(conversation.events);
+
+    this.setSnapshot({
+      status: 'listening',
+      error: '',
+    });
+  }
+
+  private getCompanionIdentityDisplayName(): string | null {
+    const identity = this.dependencies.orchestrator.getCompanionIdentity?.();
+    const displayName = identity?.displayName?.trim();
+    return displayName || null;
+  }
+
+  private async syncCompanionIdentityImmediately(displayName = this.getCompanionIdentityDisplayName()): Promise<void> {
+    const nextDisplayName = displayName?.trim();
+    if (!nextDisplayName) {
+      return;
+    }
+
+    this.clearPendingCompanionIdentitySync();
+    await this.dependencies.companionProvider.syncCompanionIdentity({
+      displayName: nextDisplayName,
+    });
+    this.lastSyncedCompanionDisplayName = nextDisplayName;
+  }
+
+  private queueCompanionIdentitySyncFromConversation(events: SessionEvent[]): void {
+    const displayName = this.getCompanionIdentityDisplayName();
+    if (!displayName || displayName === this.lastSyncedCompanionDisplayName) {
+      return;
+    }
+
+    const assistantMessage = [...events]
+      .reverse()
+      .find((event) => event.type === 'assistant-message')?.text || '';
+    this.queueCompanionIdentitySync(displayName, assistantMessage);
+  }
+
+  private queueCompanionIdentitySync(displayName: string, assistantMessage = ''): void {
+    const nextDisplayName = displayName.trim();
+    if (!nextDisplayName || nextDisplayName === this.lastSyncedCompanionDisplayName) {
+      return;
+    }
+
+    const delayMs = assistantMessage
+      ? this.getSpeechDelayMs(assistantMessage)
+      : 0;
+    this.clearPendingCompanionIdentitySync();
+    const timer = setTimeout(() => {
+      void this.flushPendingCompanionIdentitySync();
+    }, delayMs);
+    this.pendingCompanionIdentitySync = {
+      displayName: nextDisplayName,
+      timer,
+    };
+    logDebug('session', 'Queued deferred companion identity sync', {
+      displayName: nextDisplayName,
+      delayMs,
+      assistantMessage: assistantMessage ? truncateDebugText(assistantMessage, 200) : null,
+    });
+  }
+
+  private async flushPendingCompanionIdentitySync(): Promise<void> {
+    if (!this.pendingCompanionIdentitySync) {
+      return;
+    }
+
+    const { displayName } = this.pendingCompanionIdentitySync;
+    this.clearPendingCompanionIdentitySync();
+    await this.syncCompanionIdentityImmediately(displayName);
+  }
+
+  private clearPendingCompanionIdentitySync(): void {
+    if (!this.pendingCompanionIdentitySync) {
+      return;
+    }
+
+    clearTimeout(this.pendingCompanionIdentitySync.timer);
+    this.pendingCompanionIdentitySync = null;
+  }
+
+  private getSpeechDelayMs(text: string): number {
+    if (this.dependencies.estimateSpeechDelayMs) {
+      return Math.max(0, this.dependencies.estimateSpeechDelayMs(text));
+    }
+
+    const normalizedLength = text.replace(/\s+/g, '').length;
+    return Math.max(900, Math.min(3600, 520 + normalizedLength * 170));
+  }
+
+  private isProviderReplySuppressed(): boolean {
+    if (!this.suppressedProviderReply) {
+      return false;
+    }
+
+    if (Date.now() - this.suppressedProviderReply.startedAt > 15000) {
+      this.clearProviderReplySuppression();
+      return false;
+    }
+
+    return true;
+  }
+
+  private clearProviderReplySuppression(): void {
+    this.suppressedProviderReply = null;
+  }
+
+  private shouldBufferProviderEvent(event: {
+    type: 'assistant-message' | 'assistant-audio' | 'tool-call' | 'error';
+    text?: string;
+    isFinal?: boolean;
+    message?: string;
+    pcmBase64?: string;
+    sampleRate?: number;
+    channels?: number;
+    format?: 'pcm_s16le';
+    toolName?: string;
+  }): boolean {
+    if (!this.pendingProviderTurn) {
+      return false;
+    }
+
+    if (Date.now() - this.pendingProviderTurn.startedAt > 4000) {
+      this.flushBufferedProviderTurn('routing-timeout');
+      return false;
+    }
+
+    logDebug('session', 'Buffering realtime provider output while waiting for local routing decision', {
+      transcript: truncateDebugText(this.pendingProviderTurn.transcript, 200),
+      eventType: event.type,
+      text: event.text ? truncateDebugText(event.text, 160) : undefined,
+      message: event.message,
+      toolName: event.toolName,
+    });
+    return true;
+  }
+
+  private flushBufferedProviderTurn(reason: string): void {
+    const pendingTurn = this.pendingProviderTurn;
+    if (!pendingTurn) {
+      return;
+    }
+
+    logDebug('session', 'Flushing buffered provider turn after local routing decision', {
+      transcript: truncateDebugText(pendingTurn.transcript, 200),
+      reason,
+      bufferedEventCount: pendingTurn.bufferedEvents.length,
+    });
+
+    this.pendingProviderTurn = null;
+    for (const bufferedEvent of pendingTurn.bufferedEvents) {
+      this.handleProviderEvent(bufferedEvent);
+    }
+  }
+
+  private async handleProviderToolCall(event: {
+    type: 'tool-call';
+    toolName: string;
+    arguments: Record<string, unknown>;
+    rawText?: string;
+  }): Promise<void> {
+    logDebug('session', 'Handling provider tool call', {
+      toolName: event.toolName,
+      arguments: event.arguments,
+      rawText: event.rawText ? truncateDebugText(event.rawText, 320) : undefined,
+    });
+
+    const toolExecution = await this.dependencies.companionProvider.executeToolCall?.({
+      name: event.toolName,
+      arguments: event.arguments,
+      rawText: event.rawText,
+    });
+
+    if (!toolExecution) {
+      this.dependencies.emitEvent({
+        type: 'error',
+        message: `工具调用失败：${event.toolName}`,
+      });
+      return;
+    }
+
+    if (toolExecution.relatedTaskId) {
+      this.setSnapshot({
+        activeTaskId: toolExecution.relatedTaskId,
+      });
+    }
+
+    if (toolExecution.syncCompanionIdentity) {
+      this.queueCompanionIdentitySync(
+        toolExecution.syncCompanionIdentity,
+        toolExecution.assistantMessage || '',
+      );
+    }
+
+    if (toolExecution.assistantMessage) {
+      this.setSnapshot({
+        status: 'speaking',
+        lastAssistantMessage: toolExecution.assistantMessage,
+        activeTaskId: toolExecution.relatedTaskId ?? this.snapshot.activeTaskId,
+      });
+      this.dependencies.emitEvent({
+        type: 'assistant-message',
+        text: toolExecution.assistantMessage,
+        relatedTaskId: toolExecution.relatedTaskId,
+      });
     }
 
     this.setSnapshot({

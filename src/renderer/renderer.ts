@@ -20,7 +20,7 @@ import { PcmAudioPlayer } from './voice/pcmAudioPlayer';
 import type { VoiceUiState } from './voice/voiceUi';
 import type { SessionEvent, SessionSnapshot } from '../types/session';
 import type { UserSettings } from '../types/settings';
-import type { AgentWorkspaceArtifact, AgentWorkspaceCapability, AgentWorkspaceMemoryRef, AgentWorkspaceStep, TaskRecord } from '../types/tasks';
+import type { AgentCapabilityCatalogEntry, AgentWorkspaceArtifact, AgentWorkspaceCapability, AgentWorkspaceMemoryRef, AgentWorkspaceStep, TaskRecord } from '../types/tasks';
 import type { WindowStateEvent, WindowStateSnapshot } from '../types/windowState';
 import { safeConsoleLog } from '../shared/debugLogger';
 
@@ -55,6 +55,7 @@ class DesktopCompanion {
   private activeTask: TaskRecord | null = null;
   private workspaceTask: TaskRecord | null = null;
   private providerAudioSeen = false;
+  private discoveredCapabilities: AgentCapabilityCatalogEntry[] = [];
   private pendingAssistantStatusText = '';
   private assistantStatusFlushTimer: ReturnType<typeof setTimeout> | null = null;
   private lastAssistantStatusAt = 0;
@@ -279,14 +280,17 @@ class DesktopCompanion {
       this.syncSessionSnapshot(sessionSnapshot);
     }
 
-    const [tasks, settings] = await Promise.all([
+    const [tasks, discoveredCapabilities, settings] = await Promise.all([
       window.electronAPI.tasks.list(),
+      window.electronAPI.agentCapabilities.list(),
       window.electronAPI.settings.get(),
     ]);
 
     this.syncSessionSnapshot(sessionSnapshot);
     this.syncTaskList(tasks);
+    this.discoveredCapabilities = discoveredCapabilities;
     this.syncAutoExecuteSettings(settings);
+    this.syncWorkspace(this.workspaceTask);
 
     window.electronAPI.session.onEvent((event) => {
       this.handleSessionEvent(event);
@@ -495,6 +499,7 @@ class DesktopCompanion {
     const workspaceMission = document.getElementById('workspace-mission');
     const workspaceSkills = document.getElementById('workspace-skills');
     const workspaceMcps = document.getElementById('workspace-mcps');
+    const workspaceCapabilityCatalog = document.getElementById('workspace-capability-catalog');
     const workspaceSteps = document.getElementById('workspace-steps');
     const workspaceArtifacts = document.getElementById('workspace-artifacts');
     const workspaceContext = document.getElementById('workspace-context');
@@ -512,6 +517,7 @@ class DesktopCompanion {
       || !workspaceMission
       || !workspaceSkills
       || !workspaceMcps
+      || !workspaceCapabilityCatalog
       || !workspaceSteps
       || !workspaceArtifacts
       || !workspaceContext
@@ -532,6 +538,7 @@ class DesktopCompanion {
       workspaceResult.textContent = '任务完成后，这里会显示整理好的结果摘要。';
       this.renderWorkspaceCapabilities(workspaceSkills, []);
       this.renderWorkspaceCapabilities(workspaceMcps, []);
+      this.renderCapabilityCatalog(workspaceCapabilityCatalog, this.discoveredCapabilities);
       this.renderWorkspaceSteps(workspaceSteps, []);
       this.renderWorkspaceArtifacts(workspaceArtifacts, []);
       workspaceContext.textContent = '任务执行过程中，这里会生成压缩上下文。';
@@ -546,9 +553,10 @@ class DesktopCompanion {
     workspaceModeBadge.textContent = this.getWorkspaceModeLabel(task);
     workspaceSummary.textContent = task.workspace.summary;
     workspaceMission.textContent = task.workspace.mission;
-    workspaceResult.textContent = task.resultSummary || '任务仍在推进中，完成后会在这里沉淀结果。';
+    workspaceResult.textContent = this.formatWorkspaceResult(task);
     this.renderWorkspaceCapabilities(workspaceSkills, task.workspace.skills);
     this.renderWorkspaceCapabilities(workspaceMcps, task.workspace.mcps);
+    this.renderCapabilityCatalog(workspaceCapabilityCatalog, this.discoveredCapabilities, task.workspace);
     this.renderWorkspaceSteps(workspaceSteps, task.workspace.steps, task.workspace);
     this.renderWorkspaceArtifacts(workspaceArtifacts, task.workspace.artifacts);
     workspaceContext.textContent = task.workspace.compressedContext || '当前还没有生成压缩上下文。';
@@ -581,6 +589,9 @@ class DesktopCompanion {
     for (const capability of capabilities) {
       const item = document.createElement('div');
       item.className = 'workspace-chip';
+      if (capability.source) {
+        item.dataset.source = capability.source;
+      }
 
       const label = document.createElement('span');
       label.className = 'workspace-chip-label';
@@ -590,7 +601,58 @@ class DesktopCompanion {
       reason.className = 'workspace-chip-reason';
       reason.textContent = capability.reason;
 
-      item.append(label, reason);
+      if (capability.source) {
+        const meta = document.createElement('span');
+        meta.className = 'workspace-chip-meta';
+        meta.textContent = this.getCapabilitySourceLabel(capability.source);
+        item.append(label, meta, reason);
+      } else {
+        item.append(label, reason);
+      }
+      container.appendChild(item);
+    }
+  }
+
+  private renderCapabilityCatalog(
+    container: HTMLElement,
+    capabilities: AgentCapabilityCatalogEntry[],
+    workspace?: TaskRecord['workspace'],
+  ): void {
+    container.innerHTML = '';
+    if (!capabilities.length) {
+      container.appendChild(this.createWorkspaceEmpty('当前还没有发现可用的 skill 或 MCP。'));
+      return;
+    }
+
+    const prioritized = [...capabilities].sort((left, right) => {
+      const leftSelected = this.isCapabilitySelected(workspace, left.id) ? 1 : 0;
+      const rightSelected = this.isCapabilitySelected(workspace, right.id) ? 1 : 0;
+      if (leftSelected !== rightSelected) {
+        return rightSelected - leftSelected;
+      }
+      return left.label.localeCompare(right.label);
+    }).slice(0, 8);
+
+    for (const capability of prioritized) {
+      const item = document.createElement('div');
+      item.className = 'workspace-chip';
+      item.dataset.source = capability.source;
+
+      const label = document.createElement('span');
+      label.className = 'workspace-chip-label';
+      label.textContent = capability.label;
+
+      const meta = document.createElement('span');
+      meta.className = 'workspace-chip-meta';
+      meta.textContent = this.isCapabilitySelected(workspace, capability.id)
+        ? `已选中 · ${this.getCapabilitySourceLabel(capability.source)}`
+        : this.getCapabilitySourceLabel(capability.source);
+
+      const reason = document.createElement('span');
+      reason.className = 'workspace-chip-reason';
+      reason.textContent = capability.description || capability.defaultReason;
+
+      item.append(label, meta, reason);
       container.appendChild(item);
     }
   }
@@ -660,6 +722,27 @@ class DesktopCompanion {
     return candidates.find((capability) => capability.id === capabilityId)?.label || capabilityId;
   }
 
+  private isCapabilitySelected(
+    workspace: TaskRecord['workspace'] | undefined,
+    capabilityId: string,
+  ): boolean {
+    if (!workspace) {
+      return false;
+    }
+
+    return [...workspace.skills, ...workspace.mcps].some((capability) => capability.id === capabilityId);
+  }
+
+  private getCapabilitySourceLabel(source: AgentCapabilityCatalogEntry['source']): string {
+    if (source === 'skill') {
+      return 'Skill';
+    }
+    if (source === 'mcp') {
+      return 'External MCP';
+    }
+    return 'Builtin';
+  }
+
   private renderWorkspaceNotes(
     container: HTMLElement,
     notes: string[],
@@ -676,6 +759,25 @@ class DesktopCompanion {
       item.textContent = note;
       container.appendChild(item);
     }
+  }
+
+  private formatWorkspaceResult(task: TaskRecord): string {
+    if (task.resultSummary) {
+      return task.resultSummary;
+    }
+
+    const outcome = task.workspace?.outcome;
+    if (!outcome) {
+      return '任务仍在推进中，完成后会在这里沉淀结果。';
+    }
+
+    const lines = [
+      outcome.summary,
+      outcome.blockers.length ? `阻塞：${outcome.blockers.join('；')}` : '',
+      outcome.nextActions.length ? `下一步：${outcome.nextActions.join('；')}` : '',
+    ].filter(Boolean);
+
+    return lines.join('\n');
   }
 
   private renderWorkspaceArtifacts(

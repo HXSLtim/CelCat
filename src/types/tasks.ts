@@ -18,6 +18,7 @@ export type AgentWorkspaceCapability = {
   label: string;
   type: AgentWorkspaceCapabilityType;
   reason: string;
+  source?: 'builtin' | 'skill' | 'mcp';
 };
 
 export type AgentWorkspaceStep = {
@@ -34,6 +35,17 @@ export type AgentWorkspaceArtifact = {
   label: string;
   content: string;
   tone: AgentWorkspaceArtifactTone;
+};
+
+export type AgentWorkspaceOutcomeStatus = 'in_progress' | 'ready' | 'needs_attention';
+
+export type AgentWorkspaceOutcome = {
+  status: AgentWorkspaceOutcomeStatus;
+  summary: string;
+  confidence: number;
+  highlights: string[];
+  blockers: string[];
+  nextActions: string[];
 };
 
 export type AgentWorkspaceMemoryRef = {
@@ -56,6 +68,16 @@ export type AgentWorkspace = {
   artifacts: AgentWorkspaceArtifact[];
   compressedContext: string;
   memoryRefs: AgentWorkspaceMemoryRef[];
+  outcome?: AgentWorkspaceOutcome;
+};
+
+export type AgentCapabilityCatalogEntry = {
+  id: string;
+  label: string;
+  type: AgentWorkspaceCapabilityType;
+  source: 'builtin' | 'skill' | 'mcp';
+  defaultReason: string;
+  description?: string;
 };
 
 export type TaskRecord = {

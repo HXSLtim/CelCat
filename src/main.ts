@@ -2,6 +2,7 @@ const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, session, screen } 
 const path = require('path');
 import type { SessionEvent } from './types/session';
 import type { TaskRecord } from './types/tasks';
+import type { CompanionProvider } from './main-process/realtime/providerClient';
 const {
   shouldGrantPermissionCheck,
   shouldGrantPermissionRequest,
@@ -13,10 +14,11 @@ const { TaskRunner } = require('./main-process/tasks/taskRunner');
 const { UserSettingsStore } = require('./main-process/config/userSettings');
 const { ConversationOrchestrator } = require('./main-process/orchestrator/conversationOrchestrator');
 const { SessionManager } = require('./main-process/realtime/sessionManager');
-const { VolcengineRealtimeProviderClient } = require('./main-process/realtime/providerClient');
+const { createCompanionProvider } = require('./main-process/realtime/providerFactory');
 const { readAgentModelConfig, getSafeAgentModelMeta } = require('./main-process/agent/agentModelConfig');
 const { AgentMemoryStore } = require('./main-process/agent/agentMemoryStore');
 const { resolveAppWorkspaceRoot } = require('./main-process/config/appWorkspace');
+const { getAgentCapabilityCatalogEntries } = require('./main-process/agent/agentCapabilityCatalog');
 const { isDebugLoggingEnabled, logDebug, safeConsoleError, safeConsoleLog } = require('./shared/debugLogger');
 import type { WindowStateEvent, WindowStateSnapshot } from './types/windowState';
 
@@ -28,7 +30,7 @@ let settingsStore: InstanceType<typeof UserSettingsStore> | null = null;
 let memoryStore: InstanceType<typeof AgentMemoryStore> | null = null;
 let orchestrator: InstanceType<typeof ConversationOrchestrator> | null = null;
 let sessionManager: InstanceType<typeof SessionManager> | null = null;
-let companionProvider: InstanceType<typeof VolcengineRealtimeProviderClient> | null = null;
+let companionProvider: CompanionProvider | null = null;
 const DEFAULT_WINDOW_SIZE = { width: 300, height: 400 };
 let isCompanionFullscreen = false;
 let windowedBounds: Electron.Rectangle | null = null;
@@ -215,6 +217,13 @@ ipcMain.handle('task:approve', (_event: Electron.IpcMainInvokeEvent, taskId: str
   return taskRunner?.approveTask(taskId) ?? null;
 });
 
+ipcMain.handle('agent-capabilities:list', () => {
+  return getAgentCapabilityCatalogEntries({
+    env: process.env,
+    cwd: process.cwd(),
+  });
+});
+
 ipcMain.handle('settings:get', () => {
   return settingsStore?.get() ?? { autoExecute: false };
 });
@@ -244,8 +253,10 @@ app.whenReady().then(() => {
   memoryStore = new AgentMemoryStore(workspaceRoot);
   taskRunner = new TaskRunner(taskStore, undefined, memoryStore);
   settingsStore = new UserSettingsStore(workspaceRoot);
-  orchestrator = new ConversationOrchestrator(taskStore, taskRunner, settingsStore);
-  companionProvider = new VolcengineRealtimeProviderClient();
+  orchestrator = new ConversationOrchestrator(taskStore, taskRunner, settingsStore, memoryStore);
+  companionProvider = createCompanionProvider(process.env, {
+    orchestrator,
+  });
   sessionManager = new SessionManager({
     transcribeAudio: transcribeAudioWithOpenAi,
     orchestrator,

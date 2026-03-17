@@ -1,8 +1,11 @@
 import type { SessionEvent } from '../../types/session';
 import type { TaskKind, TaskRecord } from '../../types/tasks';
+import type { AgentPlanningMemoryContext, CompanionIdentityProfile } from '../agent/agentMemoryStore';
+import { AgentIntentRouter } from '../agent/agentIntentRouter';
 import { UserSettingsStore } from '../config/userSettings';
 import { TaskRunner } from '../tasks/taskRunner';
 import { InMemoryTaskStore } from '../tasks/taskStore';
+import { logDebug, truncateDebugText } from '../../shared/debugLogger';
 
 type ConversationResult = {
   events: SessionEvent[];
@@ -13,15 +16,29 @@ type ConversationResult = {
   } | null;
 };
 
+type CompanionMemoryStore = Pick<{
+  getPlanningContext: (query?: string, kind?: TaskKind) => AgentPlanningMemoryContext;
+  getCompanionIdentity: () => CompanionIdentityProfile;
+  updateCompanionIdentity: (update: {
+    displayName?: string;
+    identityNotes?: string[];
+  }) => CompanionIdentityProfile;
+}, 'getPlanningContext' | 'getCompanionIdentity' | 'updateCompanionIdentity'>;
+
 export class ConversationOrchestrator {
   constructor(
     private readonly taskStore: InMemoryTaskStore,
     private readonly taskRunner: TaskRunner,
     private readonly settingsStore: UserSettingsStore,
+    private readonly memoryStore?: CompanionMemoryStore,
+    private readonly intentRouter: AgentIntentRouter = new AgentIntentRouter(),
   ) {}
 
   async handleTranscript(transcript: string): Promise<ConversationResult> {
     const normalizedTranscript = transcript.trim();
+    logDebug('orchestrator', 'Handling transcript', {
+      transcript: truncateDebugText(normalizedTranscript, 200),
+    });
 
     if (!normalizedTranscript) {
       return {
@@ -37,8 +54,19 @@ export class ConversationOrchestrator {
     }
 
     const latestTask = this.taskStore.getLatestActive();
+    const renameResult = this.handleCompanionRename(normalizedTranscript);
+    if (renameResult) {
+      logDebug('orchestrator', 'Resolved transcript as companion identity update', {
+        transcript: truncateDebugText(normalizedTranscript, 200),
+      });
+      return renameResult;
+    }
 
     if (this.isProgressQuery(normalizedTranscript)) {
+      logDebug('orchestrator', 'Resolved transcript as progress query', {
+        transcript: truncateDebugText(normalizedTranscript, 200),
+        relatedTaskId: latestTask?.id ?? null,
+      });
       const message = latestTask
         ? `${latestTask.title} 目前的进度是：${latestTask.progressSummary}`
         : '现在还没有正在进行的后台任务，我可以继续陪你聊天或者接新任务。';
@@ -57,6 +85,10 @@ export class ConversationOrchestrator {
     }
 
     if (this.isCancelQuery(normalizedTranscript)) {
+      logDebug('orchestrator', 'Resolved transcript as cancellation query', {
+        transcript: truncateDebugText(normalizedTranscript, 200),
+        relatedTaskId: latestTask?.id ?? null,
+      });
       if (!latestTask) {
         return {
           relatedTask: null,
@@ -85,34 +117,148 @@ export class ConversationOrchestrator {
     }
 
     if (this.shouldCreateBackgroundTask(normalizedTranscript)) {
-      const kind = this.getTaskKind(normalizedTranscript);
-      const task = this.taskRunner.startTask({
-        kind,
-        transcript: normalizedTranscript,
-        title: this.getTaskTitle(kind),
-        autoExecute: this.settingsStore.get().autoExecute,
+      logDebug('orchestrator', 'Heuristically routing transcript to background agent task', {
+        transcript: truncateDebugText(normalizedTranscript, 200),
+        kind: this.getTaskKind(normalizedTranscript),
       });
-
-      return {
-        relatedTask: task,
-        companionRequest: null,
-        events: [
-          {
-            type: 'assistant-message',
-            text: `好的，我已经把这件事放到后台处理了。你可以继续和我聊天，也可以随时问我“现在进度怎么样”。`,
-            relatedTaskId: task.id,
-          },
-        ],
-      };
+      return this.createBackgroundTaskResult(normalizedTranscript, this.getTaskKind(normalizedTranscript));
     }
 
+    const routedIntent = await this.intentRouter.routeTranscript({
+      transcript: normalizedTranscript,
+      latestTaskTitle: latestTask?.title ?? null,
+      companionIdentity: this.memoryStore?.getCompanionIdentity?.() ?? null,
+      memoryContext: this.memoryStore?.getPlanningContext?.(normalizedTranscript, 'claude'),
+    });
+    if (routedIntent?.mode === 'agent') {
+      logDebug('orchestrator', 'AI router routed transcript to background agent task', {
+        transcript: truncateDebugText(normalizedTranscript, 200),
+        kind: routedIntent.kind ?? this.getTaskKind(normalizedTranscript),
+        confidence: routedIntent.confidence,
+        reason: routedIntent.reason,
+      });
+      return this.createBackgroundTaskResult(
+        routedIntent.transcript || normalizedTranscript,
+        routedIntent.kind ?? this.getTaskKind(normalizedTranscript),
+      );
+    }
+
+    const prompt = this.buildCompanionPrompt(normalizedTranscript, latestTask);
+    logDebug('orchestrator', 'Built companion prompt with agent handoff injection', {
+      transcript: truncateDebugText(normalizedTranscript, 200),
+      promptLength: prompt.length,
+      prompt: truncateDebugText(prompt, 1200),
+    });
     return {
       relatedTask: null,
       companionRequest: {
-        prompt: normalizedTranscript,
+        prompt,
         fallbackText: this.getCompanionReply(normalizedTranscript),
       },
       events: [],
+    };
+  }
+
+  async handleRealtimeProviderTranscript(transcript: string): Promise<ConversationResult | null> {
+    const result = await this.handleTranscript(transcript);
+    if (result.companionRequest) {
+      return null;
+    }
+
+    return result;
+  }
+
+  startAgentTaskFromSystem(input: {
+    transcript: string;
+    kind?: TaskKind;
+  }): ConversationResult {
+    const normalizedTranscript = input.transcript.trim();
+    const kind = input.kind ?? this.getTaskKind(normalizedTranscript);
+    logDebug('orchestrator', 'System requested background agent task', {
+      transcript: truncateDebugText(normalizedTranscript, 200),
+      kind,
+    });
+    return this.createBackgroundTaskResult(normalizedTranscript, kind);
+  }
+
+  renameCompanionFromSystem(displayName: string): ConversationResult | null {
+    const normalizedName = displayName.trim();
+    if (!normalizedName || !this.memoryStore?.updateCompanionIdentity) {
+      return null;
+    }
+
+    logDebug('orchestrator', 'System requested companion rename', {
+      displayName: normalizedName,
+    });
+    const profile = this.memoryStore.updateCompanionIdentity({
+      displayName: normalizedName,
+      identityNotes: [
+        `系统将你的当前名字更新为${normalizedName}。`,
+        `之后和用户聊天时，自然地以${normalizedName}的身份陪伴对方。`,
+      ],
+    });
+
+    return {
+      relatedTask: null,
+      companionRequest: null,
+      events: [
+        {
+          type: 'assistant-message',
+          text: `记住啦，我以后就叫${profile.displayName}。`,
+        },
+      ],
+    };
+  }
+
+  resolveCompanionReply(transcript: string, reply: string): ConversationResult | null {
+    const handoff = this.extractAgentHandoff(reply);
+    if (!handoff) {
+      if (this.shouldForceAgentFallbackFromReply(transcript, reply)) {
+        const fallbackKind = this.getTaskKind(transcript);
+        logDebug('orchestrator', 'Companion reply refused a forced agent task; overriding to background agent', {
+          transcript: truncateDebugText(transcript, 200),
+          reply: truncateDebugText(reply, 240),
+          fallbackKind,
+        });
+        return this.createBackgroundTaskResult(transcript, fallbackKind === 'claude' ? 'tool' : fallbackKind);
+      }
+
+      logDebug('orchestrator', 'Companion reply stayed in chat mode', {
+        transcript: truncateDebugText(transcript, 200),
+        reply: truncateDebugText(reply, 240),
+      });
+      return null;
+    }
+
+    logDebug('orchestrator', 'Companion reply requested background agent handoff', {
+      transcript: truncateDebugText(transcript, 200),
+      handoffKind: handoff.kind,
+      handoffTranscript: truncateDebugText(handoff.transcript, 240),
+    });
+    const taskTranscript = handoff.transcript || transcript;
+    return this.createBackgroundTaskResult(taskTranscript, handoff.kind);
+  }
+
+  getCompanionIdentity(): CompanionIdentityProfile | null {
+    return this.memoryStore?.getCompanionIdentity?.() ?? null;
+  }
+
+  getVoiceChatSessionContext(): {
+    companionIdentity: CompanionIdentityProfile | null;
+    memoryContext: AgentPlanningMemoryContext | null;
+    latestTask: Pick<TaskRecord, 'id' | 'title' | 'progressSummary'> | null;
+  } {
+    const latestTask = this.taskStore.getLatestActive();
+    return {
+      companionIdentity: this.memoryStore?.getCompanionIdentity?.() ?? null,
+      memoryContext: this.memoryStore?.getPlanningContext?.('', 'claude') ?? null,
+      latestTask: latestTask
+        ? {
+            id: latestTask.id,
+            title: latestTask.title,
+            progressSummary: latestTask.progressSummary,
+          }
+        : null,
     };
   }
 
@@ -125,7 +271,8 @@ export class ConversationOrchestrator {
   }
 
   private shouldCreateBackgroundTask(transcript: string): boolean {
-    return /(帮我|请你|去|分析|总结|整理|生成|写|创建|检查|实现|修改|运行|启动|查一下|搜一下|处理)/.test(transcript);
+    return this.isForcedAgentToolTask(transcript)
+      || /(帮我|请你|去|分析|总结|整理|生成|写|创建|检查|实现|修改|运行|启动|查一下|搜一下|处理|调研|规划|设计|修复|改一下|搜索一下|打开|浏览|抓取|下载|调用|执行)/.test(transcript);
   }
 
   private getTaskKind(transcript: string): TaskKind {
@@ -152,7 +299,156 @@ export class ConversationOrchestrator {
     return '后台分析任务';
   }
 
+  private buildCompanionPrompt(transcript: string, latestTask: TaskRecord | null): string {
+    const memoryContext = this.memoryStore?.getPlanningContext(transcript, 'claude');
+    const companionIdentity = this.memoryStore?.getCompanionIdentity();
+    if (!memoryContext && !companionIdentity) {
+      return transcript;
+    }
+
+    const displayName = companionIdentity?.displayName || 'CelCat';
+    const identityNotes = companionIdentity?.identityNotes.slice(0, 3) || [];
+    const preferences = [
+      ...(memoryContext?.stablePreferences.slice(0, 3) || []),
+      ...((memoryContext?.longTermMemories || [])
+        .filter((memory) => memory.category === 'preferences')
+        .slice(0, 2)
+        .map((memory) => memory.summary)),
+    ].map((item) => this.compactText(item, 60));
+
+    const memoryHighlights = memoryContext?.relevantMemories.length
+      ? memoryContext.relevantMemories.slice(0, 2).map((memory) => memory.summary)
+      : (memoryContext?.recentMemories.slice(0, 1).map((memory) =>
+        this.compactText(
+          `${memory.sourceTranscript} | ${memory.compressedContext || memory.resultSummary}`,
+          100,
+        ),
+      ) || []);
+
+    const promptSections = [
+      `你是 ${displayName}，一个有持续身份认知的中文桌宠 companion，正在和熟悉的用户进行实时语音聊天。`,
+      `你现在对用户自称“${displayName}”。`,
+      identityNotes.length ? `你的自我认知：${identityNotes.join('；')}` : '',
+      '请保持自然、温柔、口语化、简洁，不要生硬复述设定，不要提到“根据记忆”或“系统提示”。',
+      '如果用户是在交代需要实际执行、持续处理或多步骤完成的任务，而不是单纯闲聊，你必须把任务交给后台 agent，不要自己直接假装已经做完。',
+      '以下情况必须交给后台 agent：代码修改、项目排查、运行命令、搜索资料、浏览网页、打开浏览器、访问网站、抓取内容、调用 skill 或 MCP、生成方案/文档、长分析、多步骤整理、任何需要你“去做”的事情。',
+      '尤其注意：当用户说“帮我打开一下浏览器”“打开网页”“去搜一下”“去查一下”“访问这个网站”时，你绝对不能回答自己不会打开浏览器，而是必须交给后台 agent。',
+      '一旦需要交给 agent，你必须只输出一行机器指令，不能加任何别的话：[[CELCAT_AGENT kind=codex]]任务描述 或 [[CELCAT_AGENT kind=tool]]任务描述 或 [[CELCAT_AGENT kind=claude]]任务描述。',
+      'kind 选择规则：codex=代码/文件/项目/脚本/调试；tool=搜索/网页/抓取/外部工具；claude=分析/总结/规划/写作等非代码任务。只有纯聊天时才正常回复。',
+      preferences.length ? `用户长期偏好：${preferences.join('；')}` : '',
+      memoryHighlights.length ? `最近相关上下文：${memoryHighlights.join('；')}` : '',
+      latestTask ? `当前后台任务：${latestTask.title}，进度：${this.compactText(latestTask.progressSummary, 80)}` : '',
+      `用户刚刚说：${transcript}`,
+      '请直接像桌宠 companion 一样接话，可以自然带出熟悉感和身份认知。',
+    ].filter(Boolean);
+
+    return this.compactText(promptSections.join('\n'), 900);
+  }
+
+  private isForcedAgentToolTask(transcript: string): boolean {
+    return /(打开.{0,8}(浏览器|网页|页面|网站|chrome|谷歌浏览器|google chrome|edge|微软浏览器)|浏览器|网页|页面|网站|chrome|谷歌浏览器|google chrome|edge|微软浏览器).{0,12}(打开|访问|打开一下|搜|搜索|查|查询|浏览)/
+      .test(transcript)
+      || /(帮我|请你).{0,12}(打开浏览器|打开网页|访问网站|搜一下|搜索一下|查一下|浏览一下|打开chrome|打开谷歌浏览器|打开edge)/
+        .test(transcript)
+      || /(打开一下浏览器|帮我打开一下浏览器|打开网页|访问网站|浏览网页|打开chrome|打开谷歌浏览器|打开edge)/
+        .test(transcript);
+  }
+
+  private shouldForceAgentFallbackFromReply(transcript: string, reply: string): boolean {
+    if (!this.isForcedAgentToolTask(transcript)) {
+      return false;
+    }
+
+    return /(不好意思|抱歉|对不起).{0,20}(没办法|不能|无法|不会|做不到)/
+      .test(reply)
+      || /(没办法|不能|无法|不会|做不到).{0,24}(打开浏览器|打开网页|访问网站|搜索|浏览)/
+        .test(reply);
+  }
+
+  private handleCompanionRename(transcript: string): ConversationResult | null {
+    const nextName = this.extractCompanionRename(transcript);
+    if (!nextName || !this.memoryStore?.updateCompanionIdentity) {
+      return null;
+    }
+
+    const profile = this.memoryStore.updateCompanionIdentity({
+      displayName: nextName,
+      identityNotes: [
+        `用户最近把你的名字改成了${nextName}。`,
+        `之后和用户聊天时，自然地以${nextName}的身份陪伴对方。`,
+      ],
+    });
+
+    return {
+      relatedTask: null,
+      companionRequest: null,
+      events: [
+        {
+          type: 'assistant-message',
+          text: `记住啦，我以后就叫${profile.displayName}。之后和你说话时，我都会带着这个身份继续陪你。`,
+        },
+      ],
+    };
+  }
+
+  private extractCompanionRename(transcript: string): string | null {
+    const renamePatterns = [
+      /(?:以后|现在起|从现在起|从今天起)?(?:我)?(?:就)?(?:叫你|喊你|你叫|你以后叫|以后叫你|以后你叫|给你起名叫|给你改名叫)\s*[“"'']?([\u4e00-\u9fa5A-Za-z0-9_-]{1,16})[”"'']?/,
+      /(?:你的名字|你名字|你以后名字)(?:就|叫|改成|是)\s*[“"'']?([\u4e00-\u9fa5A-Za-z0-9_-]{1,16})[”"'']?/,
+    ];
+
+    for (const pattern of renamePatterns) {
+      const match = transcript.match(pattern);
+      const candidate = match?.[1]?.trim();
+      if (candidate && !/^我$|^你$|^自己$/.test(candidate)) {
+        return candidate;
+      }
+    }
+
+    return null;
+  }
+
+  private createBackgroundTaskResult(transcript: string, kind: TaskKind): ConversationResult {
+    const task = this.taskRunner.startTask({
+      kind,
+      transcript,
+      title: this.getTaskTitle(kind),
+      autoExecute: this.settingsStore.get().autoExecute,
+    });
+
+    return {
+      relatedTask: task,
+      companionRequest: null,
+      events: [
+        {
+          type: 'assistant-message',
+          text: '好的，我已经把这件事放到后台处理中，交给后台 agent 处理了。你可以继续和我聊天，也可以随时问我“现在进度怎么样”。',
+          relatedTaskId: task.id,
+        },
+      ],
+    };
+  }
+
+  private extractAgentHandoff(reply: string): { kind: TaskKind; transcript: string } | null {
+    const match = reply.trim().match(/^\[\[CELCAT_AGENT\s+kind=(codex|tool|claude|mcp)\]\]\s*(.+)$/is);
+    if (!match) {
+      return null;
+    }
+
+    const kind = match[1].toLowerCase() as TaskKind;
+    const transcript = match[2].trim();
+    if (!transcript) {
+      return null;
+    }
+
+    return {
+      kind,
+      transcript,
+    };
+  }
+
   private getCompanionReply(transcript: string): string {
+    const displayName = this.memoryStore?.getCompanionIdentity?.().displayName || 'CelCat';
     if (/累|烦|难受|压力|焦虑/.test(transcript)) {
       return '我在呢。你可以慢一点说，我们先把最让你难受的那一件事拎出来。';
     }
@@ -165,6 +461,15 @@ export class ConversationOrchestrator {
       return '不用客气，我会一直在这边接着你。';
     }
 
-    return `我听到了：“${transcript}”。如果你希望我认真处理它，可以直接说“帮我处理这件事”。`;
+    return `${displayName}听到了：“${transcript}”。如果你希望我认真处理它，可以直接说“帮我处理这件事”。`;
+  }
+
+  private compactText(text: string, maxLength: number): string {
+    const normalized = text.replace(/\s+/g, ' ').trim();
+    if (normalized.length <= maxLength) {
+      return normalized;
+    }
+
+    return `${normalized.slice(0, Math.max(0, maxLength - 3))}...`;
   }
 }
