@@ -11,7 +11,7 @@ test('readAgentModelConfig applies GLM Coding Plan defaults', () => {
 
   assert.equal(config.provider, 'glm');
   assert.equal(config.baseUrl, 'https://open.bigmodel.cn/api/coding/paas/v4');
-  assert.equal(config.model, 'glm-5');
+  assert.equal(config.model, 'glm-5-turbo');
   assert.equal(config.enabled, false);
 });
 
@@ -27,6 +27,6 @@ test('getSafeAgentModelMeta excludes the agent api key', () => {
     enabled: true,
     provider: 'glm',
     baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
-    model: 'glm-5',
+    model: 'glm-5-turbo',
   });
 });

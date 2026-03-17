@@ -8,7 +8,7 @@ export type AgentModelConfig = {
 
 const DEFAULT_AGENT_PROVIDER = 'glm';
 const DEFAULT_AGENT_BASE_URL = 'https://open.bigmodel.cn/api/coding/paas/v4';
-const DEFAULT_AGENT_MODEL = 'glm-5';
+const DEFAULT_AGENT_MODEL = 'glm-5-turbo';
 
 export function readAgentModelConfig(
   env: NodeJS.ProcessEnv = process.env,
@@ -40,7 +40,7 @@ export function getSafeAgentModelMeta(
 
 function normalizeAgentModelName(model: string, provider: string): string {
   if (provider === 'glm' && model === 'glm5') {
-    return 'glm-5';
+    return 'glm-5-turbo';
   }
 
   return model;
