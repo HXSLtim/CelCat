@@ -234,6 +234,10 @@ class DesktopCompanion {
       await this.toggleFullscreen();
     }
 
+    if (action === 'open-control-panel') {
+      await window.electronAPI.controlPanel.open();
+    }
+
     if (action === 'close-window') {
       window.close();
       return;

@@ -39,6 +39,10 @@ type ElectronApi = {
     get(): Promise<UserSettings>;
     update(nextSettings: Partial<UserSettings>): Promise<UserSettings>;
   };
+  controlPanel: {
+    getUrl(): Promise<string | null>;
+    open(): Promise<string | null>;
+  };
 };
 
 declare global {

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, session, screen } = require('electron');
+const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, session, screen, shell } = require('electron');
 const path = require('path');
 import type { SessionEvent } from './types/session';
 import type { TaskRecord } from './types/tasks';
@@ -19,6 +19,7 @@ const { readAgentModelConfig, getSafeAgentModelMeta } = require('./main-process/
 const { AgentMemoryStore } = require('./main-process/agent/agentMemoryStore');
 const { resolveAppWorkspaceRoot } = require('./main-process/config/appWorkspace');
 const { getAgentCapabilityCatalogEntries } = require('./main-process/agent/agentCapabilityCatalog');
+const { ControlPanelServer } = require('./main-process/control-panel/controlPanelServer');
 const { isDebugLoggingEnabled, logDebug, safeConsoleError, safeConsoleLog } = require('./shared/debugLogger');
 import type { WindowStateEvent, WindowStateSnapshot } from './types/windowState';
 
@@ -31,6 +32,7 @@ let memoryStore: InstanceType<typeof AgentMemoryStore> | null = null;
 let orchestrator: InstanceType<typeof ConversationOrchestrator> | null = null;
 let sessionManager: InstanceType<typeof SessionManager> | null = null;
 let companionProvider: CompanionProvider | null = null;
+let controlPanelServer: InstanceType<typeof ControlPanelServer> | null = null;
 const DEFAULT_WINDOW_SIZE = { width: 300, height: 400 };
 let isCompanionFullscreen = false;
 let windowedBounds: Electron.Rectangle | null = null;
@@ -234,6 +236,20 @@ ipcMain.handle('settings:update', (_event: Electron.IpcMainInvokeEvent, nextSett
   return settingsStore?.update(nextSettings) ?? { autoExecute: false };
 });
 
+ipcMain.handle('control-panel:get-url', async () => {
+  return controlPanelServer?.getUrl() ?? null;
+});
+
+ipcMain.handle('control-panel:open', async () => {
+  const url = controlPanelServer?.getUrl() || await controlPanelServer?.start?.();
+  if (!url) {
+    return null;
+  }
+
+  await shell.openExternal(url);
+  return url;
+});
+
 app.whenReady().then(() => {
   const loadedEnvFiles = loadProjectEnvFiles(process.cwd(), process.env);
   logDebug('main', 'Loaded project env files', {
@@ -257,6 +273,19 @@ app.whenReady().then(() => {
   companionProvider = createCompanionProvider(process.env, {
     orchestrator,
   });
+  controlPanelServer = new ControlPanelServer({
+    staticRoot: path.join(__dirname, 'control-panel'),
+    taskStore,
+    getSessionSnapshot: () => sessionManager?.getSnapshot() ?? null,
+    getSettings: () => settingsStore?.get() ?? { autoExecute: false },
+    getCapabilities: () => getAgentCapabilityCatalogEntries({
+      env: process.env,
+      cwd: process.cwd(),
+    }),
+    approveTask: (taskId: string) => taskRunner?.approveTask(taskId) ?? null,
+    cancelTask: (taskId: string) => taskRunner?.cancelTask(taskId) ?? null,
+    port: Number.parseInt(process.env.CELCAT_CONTROL_PANEL_PORT || '', 10) || undefined,
+  });
   sessionManager = new SessionManager({
     transcribeAudio: transcribeAudioWithOpenAi,
     orchestrator,
@@ -272,6 +301,7 @@ app.whenReady().then(() => {
     });
     mainWindow?.webContents.send('task:event', task);
   });
+  void controlPanelServer.start();
 
   session.defaultSession.setPermissionCheckHandler((
     _webContents: Electron.WebContents | null,
@@ -295,4 +325,8 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', () => {
+  void controlPanelServer?.stop();
 });

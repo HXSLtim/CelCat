@@ -94,6 +94,14 @@ const electronApi = {
       return ipcRenderer.invoke('settings:update', nextSettings);
     },
   },
+  controlPanel: {
+    getUrl(): Promise<string | null> {
+      return ipcRenderer.invoke('control-panel:get-url');
+    },
+    open(): Promise<string | null> {
+      return ipcRenderer.invoke('control-panel:open');
+    },
+  },
 };
 
 if (process.contextIsolated) {

@@ -22,6 +22,10 @@ function getStaticCopyPlan(projectRoot, distRoot) {
       from: path.join(projectRoot, 'src', 'assets'),
       to: path.join(distRoot, 'assets'),
     },
+    {
+      from: path.join(projectRoot, 'src', 'control-panel'),
+      to: path.join(distRoot, 'control-panel'),
+    },
   ];
 }
 

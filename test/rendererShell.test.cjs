@@ -32,12 +32,10 @@ test('renderer shell loads the Cubism runtime before booting the renderer bundle
   );
 });
 
-test('renderer shell includes an agent workspace panel', () => {
+test('renderer shell no longer embeds the agent workspace panel in the pet window', () => {
   const htmlPath = path.join(__dirname, '..', 'src', 'renderer', 'index.html');
   const html = fs.readFileSync(htmlPath, 'utf8');
 
-  assert.match(html, /id="workspace-panel"/, 'index.html should include a workspace panel');
-  assert.match(html, /Agent 工作区/, 'workspace panel should expose an agent workspace heading');
-  assert.match(html, /任务目标/, 'workspace panel should use localized section titles');
-  assert.match(html, /能力目录/, 'workspace panel should include a discovered capability catalog section');
+  assert.doesNotMatch(html, /id="workspace-panel"/, 'index.html should not embed a workspace panel');
+  assert.doesNotMatch(html, /Agent 工作区/, 'pet window should not show the agent workspace heading');
 });

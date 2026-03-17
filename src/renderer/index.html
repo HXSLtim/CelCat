@@ -45,62 +45,6 @@
       </div>
     </div>
     <div id="assistant-status" aria-live="polite" aria-atomic="true"></div>
-    <div id="task-status" aria-live="polite" aria-atomic="true"></div>
-    <aside id="workspace-panel" aria-live="polite" aria-atomic="false">
-      <div class="workspace-surface">
-        <div class="workspace-head">
-          <div>
-            <span class="workspace-kicker">Agent 工作区</span>
-            <h2 id="workspace-title">等待任务</h2>
-          </div>
-          <span id="workspace-mode-badge">空闲</span>
-        </div>
-        <p id="workspace-summary">当你交给我一个后台任务时，这里会显示 agent 的执行工作区、步骤、技能和 MCP 能力。</p>
-        <div class="workspace-section">
-          <span class="workspace-section-title">任务目标</span>
-          <p id="workspace-mission">暂无任务目标</p>
-        </div>
-        <div class="workspace-section">
-          <span class="workspace-section-title">技能</span>
-          <div id="workspace-skills" class="workspace-chip-row"></div>
-        </div>
-        <div class="workspace-section">
-          <span class="workspace-section-title">MCP</span>
-          <div id="workspace-mcps" class="workspace-chip-row"></div>
-        </div>
-        <div class="workspace-section">
-          <span class="workspace-section-title">能力目录</span>
-          <div id="workspace-capability-catalog" class="workspace-chip-row"></div>
-        </div>
-        <div class="workspace-section">
-          <span class="workspace-section-title">执行计划</span>
-          <div id="workspace-steps" class="workspace-step-list"></div>
-        </div>
-        <div class="workspace-section">
-          <span class="workspace-section-title">产物</span>
-          <div id="workspace-artifacts" class="workspace-artifact-list"></div>
-        </div>
-        <div class="workspace-section">
-          <span class="workspace-section-title">压缩上下文</span>
-          <pre id="workspace-context" class="workspace-context">任务执行过程中，这里会生成压缩上下文。</pre>
-        </div>
-        <div class="workspace-section">
-          <span class="workspace-section-title">记忆</span>
-          <div id="workspace-memory" class="workspace-memory-list"></div>
-        </div>
-        <div class="workspace-section">
-          <span class="workspace-section-title">备注</span>
-          <div id="workspace-notes" class="workspace-note-list"></div>
-        </div>
-        <div class="workspace-section">
-          <span class="workspace-section-title">结果</span>
-          <p id="workspace-result">任务完成后，这里会显示整理好的结果摘要。</p>
-        </div>
-        <div id="workspace-actions" class="workspace-actions">
-          <button id="workspace-approve-button" type="button">继续执行</button>
-        </div>
-      </div>
-    </aside>
     <canvas id="live2d-canvas"></canvas>
   </div>
   <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
