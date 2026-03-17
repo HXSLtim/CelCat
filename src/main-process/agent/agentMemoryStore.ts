@@ -189,12 +189,12 @@ export class AgentMemoryStore {
     identityNotes?: string[];
   }): CompanionIdentityProfile {
     const current = this.getCompanionIdentity();
+    const nextIdentityNotes = Array.isArray(update.identityNotes) && update.identityNotes.length
+      ? dedupeTextList(update.identityNotes)
+      : current.identityNotes;
     const nextProfile: CompanionIdentityProfile = {
       displayName: update.displayName?.trim() || current.displayName,
-      identityNotes: dedupeTextList([
-        ...current.identityNotes,
-        ...(update.identityNotes || []),
-      ]).slice(0, 8),
+      identityNotes: nextIdentityNotes.slice(0, 8),
       updatedAt: new Date().toISOString(),
     };
 

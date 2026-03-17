@@ -214,11 +214,12 @@ test('buildLifecycleStartSessionPayload folds voiceChat blueprint context into t
   assert.equal(payload.dialog.extra.compatibility_mode, 'voiceChatShim');
   assert.deepEqual(payload.dialog.extra.celcat_voice_chat.function_names, ['openBrowser']);
   assert.deepEqual(payload.dialog.extra.celcat_voice_chat.mcp_ids, ['playwright']);
+  assert.equal(payload.dialog.extra.celcat_voice_chat.active_task_summary, '打开浏览器：处理中');
   assert.match(payload.dialog.system_role, /Function Calling/);
   assert.match(payload.dialog.system_role, /openBrowser/);
   assert.match(payload.dialog.system_role, /Playwright/);
   assert.match(payload.dialog.system_role, /偏好中文、直接执行/);
-  assert.match(payload.dialog.system_role, /打开浏览器：处理中/);
+  assert.doesNotMatch(payload.dialog.system_role, /打开浏览器：处理中/);
   assert.match(payload.dialog.system_role, /\[\[CELCAT_TOOL name=/);
   assert.match(payload.dialog.system_role, /不要口头拒绝/);
 });

@@ -19,13 +19,10 @@ test('parseVoiceChatToolCall parses compatibility tool directives', () => {
   });
 });
 
-test('parseVoiceChatToolCall tolerates malformed streamed compatibility fragments for openBrowser', () => {
+test('parseVoiceChatToolCall does not execute malformed streamed compatibility fragments', () => {
   const parsed = parseVoiceChatToolCall('CELCATOLname=openbrowser]]');
 
-  assert.deepEqual(parsed, {
-    name: 'openBrowser',
-    arguments: {},
-  });
+  assert.equal(parsed, null);
   assert.equal(looksLikeVoiceChatToolDirectiveFragment('CELCATOLname=openbrowser]]'), true);
 });
 
@@ -294,7 +291,7 @@ test('VolcengineVoiceChatProviderClient does not sync identity inside executeToo
   assert.deepEqual(calls, []);
 });
 
-test('VolcengineVoiceChatProviderClient suppresses malformed streamed tool fragments and emits a tool-call', async () => {
+test('VolcengineVoiceChatProviderClient drops malformed streamed tool fragments without emitting a tool-call', async () => {
   const forwardedEvents = [];
   let baseSink = null;
   const provider = new VolcengineVoiceChatProviderClient(
@@ -337,12 +334,57 @@ test('VolcengineVoiceChatProviderClient suppresses malformed streamed tool fragm
   baseSink({ type: 'assistant-message', text: 'CELCATOLname=openbrowser', isFinal: false });
   baseSink({ type: 'assistant-message', text: 'CELCATOLname=openbrowser]]', isFinal: true });
 
+  assert.deepEqual(forwardedEvents, []);
+});
+
+test('VolcengineVoiceChatProviderClient resumes forwarding assistant text after a malformed tool fragment collapses into normal text', async () => {
+  const forwardedEvents = [];
+  let baseSink = null;
+  const provider = new VolcengineVoiceChatProviderClient(
+    {
+      async connect() {},
+      async disconnect() {},
+      async startSession() {},
+      async generateReply() {
+        return null;
+      },
+      async appendInputAudioFrame() {},
+      async commitInputAudio() {},
+      isEnabled() {
+        return true;
+      },
+      setEventSink(listener) {
+        baseSink = listener;
+      },
+      async syncCompanionIdentity() {},
+    },
+    new VoiceChatToolExecutor({
+      startAgentTaskFromSystem() {
+        return null;
+      },
+      renameCompanionFromSystem() {
+        return null;
+      },
+      getCompanionIdentity() {
+        return {
+          displayName: 'CelCat',
+        };
+      },
+    }),
+  );
+
+  provider.setEventSink((event) => {
+    forwardedEvents.push(event);
+  });
+
+  baseSink({ type: 'assistant-message', text: 'CELCATOLname=openbrowser', isFinal: false });
+  baseSink({ type: 'assistant-message', text: '不好意思啊，我没办法帮你打开浏览器呢。', isFinal: true });
+
   assert.deepEqual(forwardedEvents, [
     {
-      type: 'tool-call',
-      toolName: 'openBrowser',
-      arguments: {},
-      rawText: 'CELCATOLname=openbrowser]]',
+      type: 'assistant-message',
+      text: '不好意思啊，我没办法帮你打开浏览器呢。',
+      isFinal: true,
     },
   ]);
 });

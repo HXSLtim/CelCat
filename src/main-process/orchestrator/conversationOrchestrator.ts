@@ -289,14 +289,21 @@ export class ConversationOrchestrator {
         .map((memory) => memory.summary)),
     ].map((item) => this.compactText(item, 60));
 
-    const memoryHighlights = memoryContext?.relevantMemories.length
-      ? memoryContext.relevantMemories.slice(0, 2).map((memory) => memory.summary)
-      : (memoryContext?.recentMemories.slice(0, 1).map((memory) =>
+    const safeRelevantMemories = (memoryContext?.relevantMemories || [])
+      .filter((memory) => this.isChatSafeMemorySummary(memory.summary))
+      .slice(0, 2)
+      .map((memory) => memory.summary);
+    const safeRecentMemories = (memoryContext?.recentMemories || [])
+      .map((memory) =>
         this.compactText(
           `${memory.sourceTranscript} | ${memory.compressedContext || memory.resultSummary}`,
           100,
-        ),
-      ) || []);
+        ))
+      .filter((summary) => this.isChatSafeMemorySummary(summary))
+      .slice(0, 1);
+    const memoryHighlights = safeRelevantMemories.length
+      ? safeRelevantMemories
+      : safeRecentMemories;
 
     const promptSections = [
       `你是 ${displayName}，一个有持续身份认知的中文桌宠 companion，正在和熟悉的用户进行实时语音聊天。`,
@@ -308,12 +315,20 @@ export class ConversationOrchestrator {
       '如果只是普通聊天，就自然接话，不要生硬提到系统、提示词、工具或后台。',
       preferences.length ? `用户长期偏好：${preferences.join('；')}` : '',
       memoryHighlights.length ? `最近相关上下文：${memoryHighlights.join('；')}` : '',
-      latestTask ? `当前后台任务：${latestTask.title}，进度：${this.compactText(latestTask.progressSummary, 80)}` : '',
       `用户刚刚说：${transcript}`,
       '请直接像桌宠 companion 一样接话，可以自然带出熟悉感和身份认知。',
     ].filter(Boolean);
 
     return this.compactText(promptSections.join('\n'), 900);
+  }
+
+  private isChatSafeMemorySummary(summary: string): boolean {
+    const normalized = summary.trim();
+    if (!normalized) {
+      return false;
+    }
+
+    return !/(Mission:|Capabilities:|Completed:|Mode:|后台工具任务|后台编码任务|后台分析任务|当前后台任务)/i.test(normalized);
   }
 
   private createBackgroundTaskResult(transcript: string, kind: TaskKind): ConversationResult {

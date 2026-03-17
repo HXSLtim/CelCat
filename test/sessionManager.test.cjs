@@ -1077,8 +1077,34 @@ test('SessionManager prioritizes provider tool calls over pending realtime routi
   );
   assert.equal(sessionManager.getSnapshot().activeTaskId, 'task-browser');
 
-  resolveRoutingDecision(null);
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  resolveRoutingDecision({
+    relatedTask: { id: 'task-late' },
+    companionRequest: null,
+    events: [
+      {
+        type: 'assistant-message',
+        text: '这是一个不该再出现的重复接管消息。',
+        relatedTaskId: 'task-late',
+      },
+    ],
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(
+    emittedEvents.filter((event) =>
+      event.type === 'assistant-message'
+      && event.text === '好的，我已经把这件事交给后台 agent 了。',
+    ).length,
+    1,
+  );
+  assert.equal(
+    emittedEvents.some((event) =>
+      event.type === 'assistant-message'
+      && event.text === '这是一个不该再出现的重复接管消息。',
+    ),
+    false,
+  );
+  assert.equal(sessionManager.getSnapshot().activeTaskId, 'task-browser');
 });
 
 test('SessionManager defers provider tool-call rename sync until after the assistant message is emitted', async () => {

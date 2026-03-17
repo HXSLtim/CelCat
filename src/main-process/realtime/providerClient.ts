@@ -183,9 +183,7 @@ export class VolcengineRealtimeProviderClient implements CompanionProvider {
     this.sessionSystemRoleOverride = systemRole?.trim() || null;
     logDebug('provider', 'Updated realtime session system role override', {
       hasOverride: Boolean(this.sessionSystemRoleOverride),
-      preview: this.sessionSystemRoleOverride
-        ? truncateDebugText(this.sessionSystemRoleOverride, 600)
-        : null,
+      characterCount: this.sessionSystemRoleOverride?.length ?? 0,
     });
   }
 
@@ -936,9 +934,6 @@ export function buildVoiceChatShimSystemRole(input: {
         .join('；')}`
       : '',
     buildVoiceChatMemorySummary(startConfig),
-    startConfig?.activeTaskSummary
-      ? `当前后台任务：${startConfig.activeTaskSummary}`
-      : '',
     `你的当前名字是“${input.botName}”，和用户对话时请稳定使用这个名字进行自称。`,
   ].filter(Boolean);
 

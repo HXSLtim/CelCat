@@ -146,6 +146,53 @@ test('ConversationOrchestrator injects identity and memory context for companion
   assert.match(result.companionRequest.prompt, /用户刚刚说：你还记得你是谁吗/);
 });
 
+test('ConversationOrchestrator does not inject task mission summaries into casual chat prompts', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'celcat-settings-'));
+  const taskStore = new InMemoryTaskStore();
+  const taskRunner = new TaskRunner(taskStore);
+  const settingsStore = new UserSettingsStore(tempDir);
+  const activeTask = taskRunner.startTask({
+    kind: 'tool',
+    transcript: '帮我打开一下浏览器。',
+    title: '后台工具任务',
+    autoExecute: false,
+  });
+  taskStore.update(activeTask.id, {
+    progressSummary: '正在打开浏览器并准备访问站点。',
+  });
+  const memoryStore = {
+    getPlanningContext: () => ({
+      stablePreferences: ['偏好中文、直接执行、减少来回确认。'],
+      recentMemories: [],
+      relevantMemories: [{
+        title: '后台工具任务',
+        kind: 'tool',
+        summary: '帮我打开一下浏览器。 | Mission: 帮我打开一下浏览器。 Mode: completed Capabilities: skill:Playwright',
+        score: 60,
+      }],
+      longTermMemories: [],
+      capabilitySignals: [],
+    }),
+    getCompanionIdentity: () => ({
+      displayName: '豆包',
+      identityNotes: ['你是一个自然陪伴型的中文桌宠 companion。'],
+      updatedAt: new Date().toISOString(),
+    }),
+    updateCompanionIdentity: (update) => ({
+      displayName: update.displayName || '豆包',
+      identityNotes: update.identityNotes || [],
+      updatedAt: new Date().toISOString(),
+    }),
+  };
+  const orchestrator = new ConversationOrchestrator(taskStore, taskRunner, settingsStore, memoryStore);
+
+  const result = await orchestrator.handleTranscript('你是谁？');
+
+  assert.ok(result.companionRequest);
+  assert.doesNotMatch(result.companionRequest.prompt, /Mission:/);
+  assert.doesNotMatch(result.companionRequest.prompt, /当前后台任务：/);
+});
+
 test('ConversationOrchestrator does not hard-intercept spoken rename requests locally', async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'celcat-settings-'));
   const taskStore = new InMemoryTaskStore();

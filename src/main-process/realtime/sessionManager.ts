@@ -47,6 +47,9 @@ const DEFAULT_SNAPSHOT: SessionSnapshot = {
 
 const DEFAULT_REALTIME_ROUTING_DECISION_DEADLINE_MS = 1600;
 const REALTIME_ROUTING_BUFFER_MAX_MS = 4000;
+const MAX_COMPLETED_REALTIME_TURN_DISPOSITIONS = 32;
+
+type CompletedRealtimeTurnDisposition = 'released' | 'provider-tool-call' | 'superseded';
 
 export class SessionManager {
   private snapshot: SessionSnapshot = DEFAULT_SNAPSHOT;
@@ -78,6 +81,7 @@ export class SessionManager {
     deadlineTimer: ReturnType<typeof setTimeout>;
   } | null = null;
   private pendingProviderTurnId = 0;
+  private readonly completedRealtimeTurnDispositions = new Map<number, CompletedRealtimeTurnDisposition>();
 
   constructor(private readonly dependencies: SessionManagerDependencies) {
     logDebug('session', 'Registering realtime provider event sink');
@@ -400,9 +404,12 @@ export class SessionManager {
     await this.flushPendingCompanionIdentitySync();
     const conversation = await this.dependencies.orchestrator.handleRealtimeProviderTranscript?.(transcript);
     if (!this.pendingProviderTurn || this.pendingProviderTurn.id !== turnId) {
+      const completedDisposition = this.completedRealtimeTurnDispositions.get(turnId);
       if (
         conversation
         && this.pendingProviderTurnId === turnId
+        && completedDisposition !== 'provider-tool-call'
+        && completedDisposition !== 'superseded'
       ) {
         logDebug('session', 'Applying late local routing decision after provider turn was already released', {
           transcript: truncateDebugText(transcript, 200),
@@ -410,7 +417,18 @@ export class SessionManager {
           eventCount: conversation.events.length,
         });
         this.applyRealtimeConversationTakeover(transcript, conversation);
+        this.completedRealtimeTurnDispositions.delete(turnId);
+        return;
       }
+
+      if (conversation && completedDisposition === 'provider-tool-call') {
+        logDebug('session', 'Ignoring late local routing decision because the provider tool call already finalized the turn', {
+          transcript: truncateDebugText(transcript, 200),
+          hasRelatedTask: Boolean(conversation.relatedTask),
+          eventCount: conversation.events.length,
+        });
+      }
+      this.completedRealtimeTurnDispositions.delete(turnId);
       return;
     }
 
@@ -767,6 +785,7 @@ export class SessionManager {
 
     this.pendingProviderTurn = null;
     clearTimeout(pendingTurn.deadlineTimer);
+    this.rememberCompletedRealtimeTurnDisposition(pendingTurn.id, 'released');
     const filteredEvents = this.filterBufferedProviderEventsBeforeFlush(pendingTurn.bufferedEvents, reason);
     for (const bufferedEvent of filteredEvents) {
       this.handleProviderEvent(bufferedEvent);
@@ -791,6 +810,10 @@ export class SessionManager {
 
     this.pendingProviderTurn = null;
     clearTimeout(pendingTurn.deadlineTimer);
+    this.rememberCompletedRealtimeTurnDisposition(
+      pendingTurn.id,
+      reason === 'provider-tool-call' ? 'provider-tool-call' : 'superseded',
+    );
   }
 
   private filterBufferedProviderEventsBeforeFlush(
@@ -852,6 +875,20 @@ export class SessionManager {
     }
 
     this.pendingProviderTurn.stats.errorCount += 1;
+  }
+
+  private rememberCompletedRealtimeTurnDisposition(
+    turnId: number,
+    disposition: CompletedRealtimeTurnDisposition,
+  ): void {
+    this.completedRealtimeTurnDispositions.set(turnId, disposition);
+    while (this.completedRealtimeTurnDispositions.size > MAX_COMPLETED_REALTIME_TURN_DISPOSITIONS) {
+      const oldestTurnId = this.completedRealtimeTurnDispositions.keys().next().value;
+      if (oldestTurnId === undefined) {
+        break;
+      }
+      this.completedRealtimeTurnDispositions.delete(oldestTurnId);
+    }
   }
 
   private async handleProviderToolCall(event: {

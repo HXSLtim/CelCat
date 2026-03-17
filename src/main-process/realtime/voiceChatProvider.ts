@@ -75,7 +75,7 @@ export class VolcengineVoiceChatProviderClient implements CompanionProvider {
       : input;
     logDebug('provider', 'VoiceChat compatibility prompt prepared', {
       promptLength: prompt.length,
-      promptPreview: prompt.slice(0, 1200),
+      hasBlueprint: Boolean(blueprint),
     });
     const reply = await this.fallbackProvider.generateReply(prompt);
     if (!reply || !this.toolExecutor) {
@@ -146,32 +146,43 @@ export class VolcengineVoiceChatProviderClient implements CompanionProvider {
       return;
     }
 
+    if (event.type === 'transcript' || event.type === 'error') {
+      this.suppressCompatibilityToolMessage = false;
+    }
+
     if (event.type === 'assistant-message' && this.toolExecutor) {
       const normalizedText = event.text.trim();
-      if (looksLikeVoiceChatToolDirectiveFragment(normalizedText)) {
+      const looksLikeDirective = looksLikeVoiceChatToolDirectiveFragment(normalizedText);
+      if (looksLikeDirective) {
         this.suppressCompatibilityToolMessage = true;
       }
 
       if (this.suppressCompatibilityToolMessage) {
-        if (event.isFinal !== false) {
-          this.suppressCompatibilityToolMessage = false;
-          const toolCall = parseVoiceChatToolCall(normalizedText);
-          if (toolCall) {
+        const toolCall = parseVoiceChatToolCall(normalizedText);
+        if (toolCall) {
+          if (event.isFinal !== false) {
+            this.suppressCompatibilityToolMessage = false;
             this.eventSink({
               type: 'tool-call',
               toolName: toolCall.name,
               arguments: toolCall.arguments,
               rawText: normalizedText,
             });
-            return;
           }
+          return;
+        }
 
-          if (looksLikeVoiceChatToolDirectiveFragment(normalizedText)) {
+        if (event.isFinal !== false) {
+          this.suppressCompatibilityToolMessage = false;
+          if (looksLikeDirective) {
             logDebug('provider', 'Dropped malformed compatibility tool fragment from provider stream', {
               text: normalizedText.slice(0, 200),
             });
             return;
           }
+
+          this.eventSink(event);
+          return;
         }
 
         return;

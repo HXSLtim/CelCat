@@ -230,3 +230,21 @@ test('AgentMemoryStore persists companion identity updates for dynamic prompt in
   assert.equal(restored.identityNotes.some((note) => /小影/.test(note)), true);
   assert.match(journal, /当前自我称呼：小影/);
 });
+
+test('AgentMemoryStore replaces old companion identity notes when a new note set is provided', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'celcat-memory-'));
+  const store = new AgentMemoryStore(tempDir);
+
+  store.updateCompanionIdentity({
+    displayName: '小影',
+    identityNotes: ['用户希望你以后以小影的身份持续陪伴。'],
+  });
+  const profile = store.updateCompanionIdentity({
+    displayName: '豆包',
+    identityNotes: ['用户希望你以后以豆包的身份持续陪伴。'],
+  });
+
+  assert.equal(profile.displayName, '豆包');
+  assert.equal(profile.identityNotes.some((note) => /小影/.test(note)), false);
+  assert.equal(profile.identityNotes.some((note) => /豆包/.test(note)), true);
+});

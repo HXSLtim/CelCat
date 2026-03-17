@@ -145,3 +145,34 @@ test('buildVoiceChatStartConfig serializes native voiceChat-oriented fields from
   assert.equal(startConfig.memory.stablePreferences[0], '偏好中文、直接执行。');
   assert.match(startConfig.activeTaskSummary, /后台工具任务/);
 });
+
+test('buildVoiceChatSessionBlueprint excludes task mission summaries from prompt-oriented memory fields', () => {
+  const blueprint = buildVoiceChatSessionBlueprint({
+    companionIdentity: {
+      displayName: '豆包',
+      identityNotes: ['你会延续和用户之间的熟悉感。'],
+      updatedAt: new Date().toISOString(),
+    },
+    memoryContext: {
+      stablePreferences: ['偏好中文、直接执行。'],
+      recentMemories: [],
+      relevantMemories: [{
+        title: '后台工具任务',
+        kind: 'tool',
+        summary: '帮我打开一下浏览器。 | Mission: 帮我打开一下浏览器。 Mode: completed Capabilities: skill:Playwright',
+        score: 40,
+      }],
+      longTermMemories: [],
+      capabilitySignals: [],
+    },
+    latestTask: {
+      id: 'task-1',
+      title: '后台工具任务',
+      progressSummary: '正在打开浏览器。',
+    },
+  });
+
+  assert.equal(blueprint.memory.relevantMemories.length, 0);
+  assert.equal(blueprint.nativeSessionConfig.systemMessages.some((item) => /Mission:|当前后台任务：/.test(item)), false);
+  assert.match(blueprint.nativeSessionConfig.activeTaskSummary, /后台工具任务/);
+});

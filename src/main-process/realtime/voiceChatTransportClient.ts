@@ -15,7 +15,9 @@ import type { RealtimeSessionLifecycleMode } from './protocol';
 
 export type VolcengineVoiceChatTransportConfig = VolcengineRealtimeConfig & {
   transportLabel: 'voiceChat';
+  requestedTransportMode: 'shim' | 'native';
   transportMode: 'shim' | 'native';
+  nativeTransportSupported: boolean;
   protocolFamily: 'dialogue-websocket' | 'native-voicechat-openapi';
   lifecycleMode: RealtimeSessionLifecycleMode;
   startEventName: string;
@@ -31,7 +33,11 @@ export function readVolcengineVoiceChatTransportConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): VolcengineVoiceChatTransportConfig {
   const baseConfig = readVolcengineRealtimeConfig(env);
-  const transportMode = resolveVoiceChatTransportMode(env.VOLCENGINE_VOICECHAT_TRANSPORT_MODE);
+  const requestedTransportMode = resolveVoiceChatTransportMode(env.VOLCENGINE_VOICECHAT_TRANSPORT_MODE);
+  const nativeTransportSupported = false;
+  const transportMode = requestedTransportMode === 'native' && nativeTransportSupported
+    ? 'native'
+    : 'shim';
   return {
     ...baseConfig,
     enabled: env.VOLCENGINE_VOICECHAT_ENABLED
@@ -54,7 +60,9 @@ export function readVolcengineVoiceChatTransportConfig(
     appendEventName: env.VOLCENGINE_VOICECHAT_APPEND_EVENT || baseConfig.appendEventName,
     commitEventName: env.VOLCENGINE_VOICECHAT_COMMIT_EVENT || baseConfig.commitEventName,
     transportLabel: 'voiceChat',
+    requestedTransportMode,
     transportMode,
+    nativeTransportSupported,
     protocolFamily: transportMode === 'native' ? 'native-voicechat-openapi' : 'dialogue-websocket',
     lifecycleMode: transportMode === 'native' ? 'voiceChatNative' : 'voiceChatShim',
   };
@@ -62,6 +70,7 @@ export function readVolcengineVoiceChatTransportConfig(
 
 export class VolcengineVoiceChatTransportClient implements VoiceChatTransportLike {
   private sessionBlueprint: VoiceChatSessionBlueprint | null = null;
+  private hasLoggedNativeFallback = false;
 
   constructor(
     private readonly baseClient: CompanionProvider = new VolcengineRealtimeProviderClient(
@@ -73,6 +82,7 @@ export class VolcengineVoiceChatTransportClient implements VoiceChatTransportLik
   setSessionBlueprint(blueprint: VoiceChatSessionBlueprint | null): void {
     this.sessionBlueprint = blueprint;
     const startConfig = blueprint ? buildVoiceChatStartConfig(blueprint) : null;
+    this.logNativeFallbackIfNeeded();
     if ('setTransportLifecycleMode' in this.baseClient && typeof this.baseClient.setTransportLifecycleMode === 'function') {
       this.baseClient.setTransportLifecycleMode(this.config.lifecycleMode);
     }
@@ -95,11 +105,13 @@ export class VolcengineVoiceChatTransportClient implements VoiceChatTransportLik
   }
 
   connect(): Promise<void> {
+    this.logNativeFallbackIfNeeded();
     logDebug('provider', 'Connecting via dedicated voiceChat transport', {
       address: this.config.address,
       uri: this.config.uri,
       resourceId: this.config.resourceId,
       startEventName: this.config.startEventName,
+      requestedTransportMode: this.config.requestedTransportMode,
       transportMode: this.config.transportMode,
       protocolFamily: this.config.protocolFamily,
       migrationMode: this.config.transportMode === 'native'
@@ -115,6 +127,7 @@ export class VolcengineVoiceChatTransportClient implements VoiceChatTransportLik
 
   startSession(): Promise<void> {
     const startConfig = this.sessionBlueprint ? buildVoiceChatStartConfig(this.sessionBlueprint) : null;
+    this.logNativeFallbackIfNeeded();
     logDebug('provider', 'Starting voiceChat transport session', {
       displayName: this.sessionBlueprint?.assistant.displayName ?? this.config.botName,
       toolCount: this.sessionBlueprint?.capabilities.tools.length ?? 0,
@@ -122,6 +135,7 @@ export class VolcengineVoiceChatTransportClient implements VoiceChatTransportLik
       nativeFunctionCount: startConfig?.functions.length ?? 0,
       nativeMcpCount: startConfig?.mcps.length ?? 0,
       hasActiveTask: Boolean(this.sessionBlueprint?.activeTask),
+      requestedTransportMode: this.config.requestedTransportMode,
       transportMode: this.config.transportMode,
       protocolFamily: this.config.protocolFamily,
       lifecycle: this.sessionBlueprint?.transport.lifecycle ?? 'startVoiceChat-compatible',
@@ -167,6 +181,22 @@ export class VolcengineVoiceChatTransportClient implements VoiceChatTransportLik
       ? this.baseClient.executeToolCall(toolCall)
       : Promise.resolve(null);
   }
+
+  private logNativeFallbackIfNeeded(): void {
+    if (
+      this.hasLoggedNativeFallback
+      || this.config.requestedTransportMode !== 'native'
+      || this.config.transportMode === 'native'
+    ) {
+      return;
+    }
+
+    this.hasLoggedNativeFallback = true;
+    logDebug('provider', 'Native StartVoiceChat transport is not implemented yet; falling back to shim mode', {
+      requestedTransportMode: this.config.requestedTransportMode,
+      effectiveTransportMode: this.config.transportMode,
+    });
+  }
 }
 
 function buildVoiceChatSessionSystemRole(blueprint: VoiceChatSessionBlueprint): string {
@@ -192,9 +222,6 @@ function buildVoiceChatSessionSystemRole(blueprint: VoiceChatSessionBlueprint): 
       : '',
     `可用工具：${toolSummary}`,
     `可用 MCP：${mcpSummary}`,
-    blueprint.activeTask
-      ? `当前后台任务：${blueprint.activeTask.title}，进度：${blueprint.activeTask.progressSummary}`
-      : '',
     '如果用户明确要求你改名、换名、以后改叫某个名字，优先输出 [[CELCAT_TOOL name=renameCompanion]]{"displayName":"新名字"}。',
     '如果用户要求打开浏览器、访问网页、搜索资料或执行任务，优先输出对应工具调用，而不是口头拒绝。',
     '如果只是普通聊天，就自然直接回复，不要输出工具调用。',

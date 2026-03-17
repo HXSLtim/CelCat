@@ -36,14 +36,16 @@ test('readVolcengineVoiceChatTransportConfig prefers dedicated voiceChat env var
   assert.equal(config.transportLabel, 'voiceChat');
 });
 
-test('readVolcengineVoiceChatTransportConfig supports an explicit native transport mode', () => {
+test('readVolcengineVoiceChatTransportConfig falls back to shim when native transport is requested but unsupported', () => {
   const config = readVolcengineVoiceChatTransportConfig({
     VOLCENGINE_VOICECHAT_TRANSPORT_MODE: 'native',
   });
 
-  assert.equal(config.transportMode, 'native');
-  assert.equal(config.protocolFamily, 'native-voicechat-openapi');
-  assert.equal(config.lifecycleMode, 'voiceChatNative');
+  assert.equal(config.requestedTransportMode, 'native');
+  assert.equal(config.nativeTransportSupported, false);
+  assert.equal(config.transportMode, 'shim');
+  assert.equal(config.protocolFamily, 'dialogue-websocket');
+  assert.equal(config.lifecycleMode, 'voiceChatShim');
 });
 
 test('VolcengineVoiceChatTransportClient forwards provider lifecycle to the wrapped base client', async () => {
@@ -145,7 +147,7 @@ test('VolcengineVoiceChatTransportClient forwards provider lifecycle to the wrap
   ]);
 });
 
-test('VolcengineVoiceChatTransportClient forwards a native transport lifecycle when configured', () => {
+test('VolcengineVoiceChatTransportClient falls back to shim lifecycle when native transport is requested but unsupported', () => {
   const calls = [];
   const transport = new VolcengineVoiceChatTransportClient(
     {
@@ -209,6 +211,6 @@ test('VolcengineVoiceChatTransportClient forwards a native transport lifecycle w
   });
 
   assert.deepEqual(calls, [
-    ['setTransportLifecycleMode', 'voiceChatNative'],
+    ['setTransportLifecycleMode', 'voiceChatShim'],
   ]);
 });

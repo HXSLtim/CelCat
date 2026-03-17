@@ -127,7 +127,7 @@ export function parseVoiceChatToolCall(text: string): CompanionToolCall | null {
   const normalizedText = text.trim();
   const match = normalizedText.match(TOOL_CALL_PATTERN);
   if (!match) {
-    return parseRelaxedVoiceChatToolCall(normalizedText);
+    return null;
   }
 
   const name = canonicalizeVoiceChatToolName(match[1].trim());
@@ -171,36 +171,6 @@ function safeParseVoiceChatToolArguments(rawArguments: string): Record<string, u
 
   return null;
 }
-
-function parseRelaxedVoiceChatToolCall(text: string): CompanionToolCall | null {
-  if (!looksLikeVoiceChatToolDirectiveFragment(text)) {
-    return null;
-  }
-
-  const match = text.match(TOOL_CALL_FRAGMENT_PATTERN);
-  if (!match) {
-    return null;
-  }
-
-  const name = canonicalizeVoiceChatToolName(match[1].trim());
-  if (!name) {
-    return null;
-  }
-
-  const rawArguments = match[2].trim();
-  const argumentsPayload = rawArguments
-    ? safeParseVoiceChatToolArguments(rawArguments)
-    : {};
-  if (!argumentsPayload) {
-    return null;
-  }
-
-  return {
-    name,
-    arguments: argumentsPayload,
-  };
-}
-
 function canonicalizeVoiceChatToolName(rawName: string): string | null {
   const normalizedRawName = rawName.replace(/[\s_-]+/g, '').toLowerCase();
   return KNOWN_TOOL_NAMES.find((toolName) =>

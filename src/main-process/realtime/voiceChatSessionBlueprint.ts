@@ -70,6 +70,10 @@ export function buildVoiceChatSessionBlueprint(input: {
   const identityNotes = companionIdentity?.identityNotes.slice(0, 4) || [
     '你是一个自然陪伴型的中文桌宠 companion。',
   ];
+  const relevantMemorySummaries = (memoryContext?.relevantMemories || [])
+    .filter((memory) => isPromptSafeMemorySummary(memory.summary))
+    .slice(0, 3)
+    .map((memory) => memory.summary);
   const mcpServers = getAgentCapabilityCatalogEntries({
     env: input.env,
     cwd: input.cwd,
@@ -93,7 +97,7 @@ export function buildVoiceChatSessionBlueprint(input: {
     },
     memory: {
       stablePreferences: memoryContext?.stablePreferences.slice(0, 4) || [],
-      relevantMemories: memoryContext?.relevantMemories.slice(0, 3).map((memory) => memory.summary) || [],
+      relevantMemories: relevantMemorySummaries,
       longTermMemories: memoryContext?.longTermMemories.slice(0, 3).map((memory) => memory.summary) || [],
     },
     capabilities: {
@@ -108,7 +112,7 @@ export function buildVoiceChatSessionBlueprint(input: {
         identityNotes,
       }),
       stablePreferences: memoryContext?.stablePreferences.slice(0, 4) || [],
-      relevantMemories: memoryContext?.relevantMemories.slice(0, 3).map((memory) => memory.summary) || [],
+      relevantMemories: relevantMemorySummaries,
       longTermMemories: memoryContext?.longTermMemories.slice(0, 3).map((memory) => memory.summary) || [],
       tools,
       mcpServers,
@@ -192,9 +196,6 @@ function buildVoiceChatNativeSessionConfig(input: {
       input.longTermMemories.length
         ? `长期记忆：${input.longTermMemories.join('；')}`
         : '',
-      input.latestTask
-        ? `当前后台任务：${input.latestTask.title}，进度：${input.latestTask.progressSummary}`
-        : '',
     ].filter(Boolean),
     functions: input.tools.map((tool) => ({
       name: tool.id,
@@ -237,9 +238,6 @@ export function buildVoiceChatStartConfig(
       blueprint.memory.longTermMemories.length
         ? `长期记忆：${blueprint.memory.longTermMemories.join('；')}`
         : '',
-      blueprint.activeTask
-        ? `当前后台任务：${blueprint.activeTask.title}，进度：${blueprint.activeTask.progressSummary}`
-        : '',
     ].filter(Boolean),
     functions: blueprint.capabilities.tools.map((tool) => ({
       name: tool.id,
@@ -260,4 +258,13 @@ export function buildVoiceChatStartConfig(
       ? `${blueprint.activeTask.title}：${blueprint.activeTask.progressSummary}`
       : null,
   };
+}
+
+function isPromptSafeMemorySummary(summary: string): boolean {
+  const normalized = summary.trim();
+  if (!normalized) {
+    return false;
+  }
+
+  return !/(Mission:|Capabilities:|Completed:|Mode:|后台工具任务|后台编码任务|后台分析任务|当前后台任务)/i.test(normalized);
 }
