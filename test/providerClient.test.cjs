@@ -262,6 +262,51 @@ test('buildVoiceChatShimSystemRole preserves the active display name in shim mod
   assert.match(systemRole, /你的当前名字是“豆包”/);
 });
 
+test('buildVoiceChatShimSystemRole dedupes repeated assistant system prompts from the session blueprint', () => {
+  const systemRole = buildVoiceChatShimSystemRole({
+    config: {
+      enabled: true,
+      address: 'wss://openspeech.bytedance.com',
+      uri: '/api/v3/realtime/dialogue',
+      appId: 'app-id',
+      appKey: 'app-key',
+      accessToken: 'access-token',
+      resourceId: 'volc.speech.dialog',
+      uid: 'celcat-test',
+      botName: '小影',
+      headersJson: '',
+      appendEventName: 'input_audio_buffer.append',
+      commitEventName: 'input_audio_buffer.commit',
+      systemRole: '你是一个温柔的中文桌宠。',
+      speakingStyle: '简洁',
+      speaker: 'speaker',
+      ttsFormat: 'pcm_s16le',
+      ttsSampleRate: 24000,
+    },
+    botName: '豆包',
+    systemRoleOverride: '你是 豆包，一个持续陪伴用户的中文桌宠 companion。',
+    voiceChatStartConfig: {
+      systemMessages: [
+        '你是 豆包，一个持续陪伴用户的中文桌宠 companion。',
+        '你现在对用户自称“豆包”。',
+      ],
+      functions: [],
+      mcps: [],
+      memory: {
+        stablePreferences: [],
+        relevantMemories: [],
+        longTermMemories: [],
+      },
+      activeTaskSummary: null,
+    },
+  });
+
+  assert.equal(
+    systemRole.match(/你是 豆包，一个持续陪伴用户的中文桌宠 companion。/g)?.length ?? 0,
+    1,
+  );
+});
+
 test('buildLifecycleStartSessionPayload exposes a native StartVoiceChat payload placeholder', () => {
   const payload = buildLifecycleStartSessionPayload({
     lifecycleMode: 'voiceChatNative',

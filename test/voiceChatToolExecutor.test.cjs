@@ -237,6 +237,76 @@ test('VolcengineVoiceChatProviderClient injects rename guidance into the compati
   assert.match(capturedPrompt, /反例：“你叫什么名字”/);
 });
 
+test('VolcengineVoiceChatProviderClient uses a lean turn prompt after the compatibility session is primed', async () => {
+  let capturedPrompt = '';
+  let capturedBlueprint = null;
+  const blueprint = {
+    generatedAt: new Date().toISOString(),
+    transport: {
+      providerMode: 'voiceChat',
+      lifecycle: 'startVoiceChat-compatible',
+      migrationTarget: 'StartVoiceChat + Function Calling + MCP + Memory',
+    },
+    assistant: {
+      displayName: 'CelCat',
+      identityNotes: ['你是一个自然陪伴型的中文桌宠 companion。'],
+      systemPrompt: 'test',
+    },
+    memory: {
+      stablePreferences: [],
+      relevantMemories: [],
+      longTermMemories: [],
+    },
+    capabilities: {
+      tools: [],
+      mcpServers: [],
+    },
+    activeTask: null,
+  };
+  const provider = new VolcengineVoiceChatProviderClient(
+    {
+      setSessionBlueprint(nextBlueprint) {
+        capturedBlueprint = nextBlueprint;
+      },
+      async connect() {},
+      async disconnect() {},
+      async startSession() {},
+      async generateReply(input) {
+        capturedPrompt = input;
+        return '我叫CelCat。';
+      },
+      async appendInputAudioFrame() {},
+      async commitInputAudio() {},
+      isEnabled() {
+        return true;
+      },
+      setEventSink() {},
+      async syncCompanionIdentity() {},
+    },
+    new VoiceChatToolExecutor({
+      startAgentTaskFromSystem() {
+        return null;
+      },
+      renameCompanionFromSystem() {
+        return null;
+      },
+      getCompanionIdentity() {
+        return {
+          displayName: 'CelCat',
+        };
+      },
+    }),
+    () => blueprint,
+  );
+
+  await provider.startSession();
+  await provider.generateReplyPayload('帮我打开浏览器');
+
+  assert.deepEqual(capturedBlueprint, blueprint);
+  assert.equal(capturedPrompt, '以下是本轮对话输入：\n帮我打开浏览器');
+  assert.doesNotMatch(capturedPrompt, /工具调用格式：\[\[CELCAT_TOOL/);
+});
+
 test('VolcengineVoiceChatProviderClient does not sync identity inside executeToolCall', async () => {
   const calls = [];
   const provider = new VolcengineVoiceChatProviderClient(

@@ -914,7 +914,7 @@ export function buildVoiceChatShimSystemRole(input: {
 }): string {
   const baseRole = input.systemRoleOverride?.trim() || input.config.systemRole;
   const startConfig = input.voiceChatStartConfig;
-  const sections = [
+  const sections = dedupeOrderedTextSections([
     baseRole,
     '你当前运行在 CelCat 的 StartVoiceChat 兼容模式中。',
     '如果需要调用本地工具，请只输出一行工具调用，格式：[[CELCAT_TOOL name=<toolName>]]{"field":"value"}。',
@@ -935,7 +935,7 @@ export function buildVoiceChatShimSystemRole(input: {
       : '',
     buildVoiceChatMemorySummary(startConfig),
     `你的当前名字是“${input.botName}”，和用户对话时请稳定使用这个名字进行自称。`,
-  ].filter(Boolean);
+  ]);
 
   return sections.join('\n').slice(0, 3200);
 }
@@ -975,6 +975,23 @@ function buildVoiceChatShimMetadata(
       long_term_memories: startConfig?.memory.longTermMemories.length ?? 0,
     },
   };
+}
+
+function dedupeOrderedTextSections(sections: Array<string | null | undefined>): string[] {
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+
+  for (const section of sections) {
+    const normalized = section?.trim();
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+
+    seen.add(normalized);
+    deduped.push(normalized);
+  }
+
+  return deduped;
 }
 
 function isRecord(value: unknown): value is Record<string, any> {

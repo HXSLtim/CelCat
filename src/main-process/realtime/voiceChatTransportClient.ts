@@ -200,34 +200,7 @@ export class VolcengineVoiceChatTransportClient implements VoiceChatTransportLik
 }
 
 function buildVoiceChatSessionSystemRole(blueprint: VoiceChatSessionBlueprint): string {
-  const toolSummary = blueprint.capabilities.tools
-    .map((tool) => `${tool.id}: ${tool.description}`)
-    .join('；');
-  const mcpSummary = blueprint.capabilities.mcpServers.length
-    ? blueprint.capabilities.mcpServers
-      .slice(0, 4)
-      .map((capability) => `${capability.label}: ${capability.defaultReason}`)
-      .join('；')
-    : '当前没有额外 MCP。';
-  const sections = [
-    blueprint.assistant.systemPrompt,
-    blueprint.memory.stablePreferences.length
-      ? `用户稳定偏好：${blueprint.memory.stablePreferences.join('；')}`
-      : '',
-    blueprint.memory.relevantMemories.length
-      ? `相关记忆：${blueprint.memory.relevantMemories.join('；')}`
-      : '',
-    blueprint.memory.longTermMemories.length
-      ? `长期记忆：${blueprint.memory.longTermMemories.join('；')}`
-      : '',
-    `可用工具：${toolSummary}`,
-    `可用 MCP：${mcpSummary}`,
-    '如果用户明确要求你改名、换名、以后改叫某个名字，优先输出 [[CELCAT_TOOL name=renameCompanion]]{"displayName":"新名字"}。',
-    '如果用户要求打开浏览器、访问网页、搜索资料或执行任务，优先输出对应工具调用，而不是口头拒绝。',
-    '如果只是普通聊天，就自然直接回复，不要输出工具调用。',
-  ].filter(Boolean);
-
-  return sections.join('\n').slice(0, 2400);
+  return blueprint.assistant.systemPrompt.slice(0, 1200);
 }
 
 function resolveVoiceChatTransportMode(rawMode?: string): 'shim' | 'native' {

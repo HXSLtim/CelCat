@@ -23,6 +23,7 @@ export class VolcengineVoiceChatProviderClient implements CompanionProvider {
   private pendingCompatibilityDirective: {
     startedAt: number;
   } | null = null;
+  private compatibilitySessionPrimed = false;
 
   constructor(
     private readonly fallbackProvider: CompanionProvider = new VolcengineVoiceChatTransportClient(),
@@ -43,6 +44,7 @@ export class VolcengineVoiceChatProviderClient implements CompanionProvider {
   }
 
   disconnect(): Promise<void> {
+    this.compatibilitySessionPrimed = false;
     return this.fallbackProvider.disconnect();
   }
 
@@ -53,6 +55,7 @@ export class VolcengineVoiceChatProviderClient implements CompanionProvider {
       if ('setSessionBlueprint' in this.fallbackProvider && typeof this.fallbackProvider.setSessionBlueprint === 'function') {
         this.fallbackProvider.setSessionBlueprint(blueprint);
       }
+      this.compatibilitySessionPrimed = true;
       logDebug('provider', 'Prepared StartVoiceChat-compatible session blueprint', {
         displayName: blueprint.assistant.displayName,
         toolCount: blueprint.capabilities.tools.length,
@@ -61,6 +64,8 @@ export class VolcengineVoiceChatProviderClient implements CompanionProvider {
         relevantMemoryCount: blueprint.memory.relevantMemories.length,
         activeTaskTitle: blueprint.activeTask?.title ?? null,
       });
+    } else {
+      this.compatibilitySessionPrimed = false;
     }
     return this.fallbackProvider.startSession();
   }
@@ -73,11 +78,12 @@ export class VolcengineVoiceChatProviderClient implements CompanionProvider {
   async generateReplyPayload(input: string): Promise<CompanionReplyPayload> {
     const blueprint = this.sessionBlueprintResolver?.() ?? null;
     const prompt = this.toolExecutor
-      ? buildVoiceChatCompatibilityPrompt(input, blueprint)
+      ? buildVoiceChatCompatibilityPrompt(input, blueprint, this.compatibilitySessionPrimed)
       : input;
     logDebug('provider', 'VoiceChat compatibility prompt prepared', {
       promptLength: prompt.length,
       hasBlueprint: Boolean(blueprint),
+      compatibilitySessionPrimed: this.compatibilitySessionPrimed,
     });
     const reply = await this.fallbackProvider.generateReply(prompt);
     if (!reply || !this.toolExecutor) {
@@ -219,7 +225,15 @@ export class VolcengineVoiceChatProviderClient implements CompanionProvider {
 function buildVoiceChatCompatibilityPrompt(
   input: string,
   blueprint: VoiceChatSessionBlueprint | null,
+  compatibilitySessionPrimed: boolean,
 ): string {
+  if (blueprint && compatibilitySessionPrimed) {
+    return [
+      '以下是本轮对话输入：',
+      input,
+    ].join('\n');
+  }
+
   return [
     '你正在运行在 CelCat 的 VoiceChat 兼容 Function Calling 模式中。',
     '如果需要调用本地工具，请只输出一行工具调用，不要输出解释、前后缀或 Markdown。',
