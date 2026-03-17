@@ -23,6 +23,24 @@ body {
   width: 100vw;
   height: 100vh;
   position: relative;
+  isolation: isolate;
+}
+
+#app::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  background:
+    radial-gradient(circle at top, rgba(245, 218, 175, 0.2), transparent 36%),
+    linear-gradient(180deg, rgba(9, 14, 24, 0.4), rgba(9, 14, 24, 0.16) 36%, rgba(9, 14, 24, 0.62));
+  transition: opacity 220ms ease;
+  pointer-events: none;
+  z-index: 0;
+}
+
+body.is-fullscreen #app::before {
+  opacity: 1;
 }
 
 #window-chrome {
@@ -102,6 +120,8 @@ body {
 }
 
 #live2d-canvas {
+  position: relative;
+  z-index: 1;
   width: 100%;
   height: 100%;
   -webkit-app-region: no-drag;
@@ -296,6 +316,7 @@ body {
 #assistant-status,
 #task-status {
   position: absolute;
+  z-index: 2;
   left: 50%;
   max-width: min(260px, calc(100vw - 24px));
   padding: 10px 14px;
@@ -367,12 +388,360 @@ body {
   color: rgba(229, 255, 248, 0.96);
 }
 
+#workspace-panel {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  width: min(360px, calc(100vw - 28px));
+  max-height: calc(100vh - 36px);
+  z-index: 2;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(8px);
+  transition: opacity 180ms ease, transform 180ms ease, visibility 180ms ease;
+  pointer-events: none;
+}
+
+#workspace-panel.is-visible {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+
+.workspace-surface {
+  display: grid;
+  gap: 12px;
+  max-height: inherit;
+  overflow: auto;
+  padding: 16px;
+  border-radius: 24px;
+  background: rgba(7, 12, 20, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(244, 247, 255, 0.94);
+  backdrop-filter: blur(20px) saturate(132%);
+  box-shadow: 0 24px 52px rgba(0, 0, 0, 0.22);
+  pointer-events: auto;
+}
+
+.workspace-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.workspace-kicker,
+.workspace-section-title {
+  display: block;
+  color: rgba(255, 255, 255, 0.55);
+  font: 600 10px/1.2 'Segoe UI', sans-serif;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+#workspace-title {
+  margin-top: 5px;
+  color: rgba(255, 255, 255, 0.98);
+  font: 700 18px/1.2 'Segoe UI', sans-serif;
+}
+
+#workspace-mode-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.8);
+  font: 600 11px/1 'Segoe UI', sans-serif;
+  white-space: nowrap;
+}
+
+#workspace-summary,
+#workspace-mission,
+#workspace-result {
+  color: rgba(237, 242, 255, 0.88);
+  font: 500 13px/1.55 'Segoe UI', sans-serif;
+}
+
+.workspace-section {
+  display: grid;
+  gap: 8px;
+}
+
+.workspace-chip-row,
+.workspace-note-list,
+.workspace-step-list,
+.workspace-artifact-list,
+.workspace-memory-list {
+  display: grid;
+  gap: 8px;
+}
+
+.workspace-chip-row {
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+}
+
+.workspace-chip {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.workspace-chip-label {
+  color: rgba(255, 255, 255, 0.96);
+  font: 600 12px/1.2 'Segoe UI', sans-serif;
+}
+
+.workspace-chip-reason {
+  color: rgba(255, 255, 255, 0.62);
+  font: 500 11px/1.45 'Segoe UI', sans-serif;
+}
+
+.workspace-step {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.workspace-step-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.workspace-step-title {
+  color: rgba(255, 255, 255, 0.96);
+  font: 600 13px/1.3 'Segoe UI', sans-serif;
+}
+
+.workspace-step-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  color: rgba(255, 255, 255, 0.72);
+  font: 600 10px/1 'Segoe UI', sans-serif;
+  text-transform: uppercase;
+}
+
+.workspace-step[data-status='in_progress'] .workspace-step-status {
+  background: rgba(109, 231, 198, 0.16);
+  color: rgba(211, 255, 242, 0.94);
+}
+
+.workspace-step[data-status='completed'] .workspace-step-status {
+  background: rgba(212, 175, 55, 0.16);
+  color: rgba(255, 246, 209, 0.94);
+}
+
+.workspace-step[data-status='blocked'] .workspace-step-status {
+  background: rgba(255, 170, 170, 0.14);
+  color: rgba(255, 225, 225, 0.94);
+}
+
+.workspace-step-summary,
+.workspace-step-capability,
+.workspace-note {
+  color: rgba(255, 255, 255, 0.72);
+  font: 500 11px/1.5 'Segoe UI', sans-serif;
+}
+
+.workspace-artifact {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.workspace-artifact[data-tone='success'] {
+  border-color: rgba(109, 231, 198, 0.2);
+}
+
+.workspace-artifact[data-tone='warning'] {
+  border-color: rgba(255, 196, 109, 0.2);
+}
+
+.workspace-artifact-label {
+  color: rgba(255, 255, 255, 0.95);
+  font: 600 12px/1.2 'Segoe UI', sans-serif;
+}
+
+.workspace-artifact-content {
+  white-space: pre-wrap;
+  color: rgba(255, 255, 255, 0.7);
+  font: 500 11px/1.5 'Consolas', 'Segoe UI', monospace;
+}
+
+.workspace-context {
+  padding: 12px 14px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  white-space: pre-wrap;
+  color: rgba(255, 255, 255, 0.72);
+  font: 500 11px/1.55 'Consolas', 'Segoe UI', monospace;
+}
+
+.workspace-memory-item {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.workspace-memory-label {
+  color: rgba(255, 255, 255, 0.95);
+  font: 600 12px/1.25 'Segoe UI', sans-serif;
+}
+
+.workspace-memory-summary,
+.workspace-memory-path {
+  color: rgba(255, 255, 255, 0.64);
+  font: 500 11px/1.5 'Segoe UI', sans-serif;
+  word-break: break-all;
+}
+
+.workspace-actions {
+  display: none;
+}
+
+.workspace-actions.is-visible {
+  display: flex;
+}
+
+#workspace-approve-button {
+  min-height: 42px;
+  padding: 0 16px;
+  border: none;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(255, 236, 179, 0.94), rgba(232, 194, 92, 0.94));
+  color: rgba(36, 22, 4, 0.92);
+  font: 700 13px/1 'Segoe UI', sans-serif;
+  cursor: pointer;
+  box-shadow: 0 14px 28px rgba(165, 118, 16, 0.22);
+}
+
+#workspace-approve-button:hover {
+  transform: translateY(-1px);
+}
+
+.workspace-empty {
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.035);
+  color: rgba(255, 255, 255, 0.52);
+  font: 500 11px/1.45 'Segoe UI', sans-serif;
+}
+
+body.is-fullscreen #window-chrome {
+  padding: 18px;
+}
+
+body.is-fullscreen #window-chrome::before {
+  height: 108px;
+  background: linear-gradient(
+    180deg,
+    rgba(11, 16, 25, 0.42) 0%,
+    rgba(11, 16, 25, 0.18) 44%,
+    rgba(11, 16, 25, 0) 100%
+  );
+}
+
+body.is-fullscreen #drag-button {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+body.is-fullscreen #window-menu {
+  top: 64px;
+  min-width: 220px;
+}
+
+body.is-fullscreen #workspace-panel {
+  top: 24px;
+  right: 24px;
+  width: min(460px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+}
+
+body.is-fullscreen .workspace-surface {
+  padding: 20px;
+  border-radius: 28px;
+}
+
+body.is-fullscreen #workspace-title {
+  font-size: 22px;
+}
+
+body.is-fullscreen #workspace-summary,
+body.is-fullscreen #workspace-mission,
+body.is-fullscreen #workspace-result {
+  font-size: 14px;
+}
+
+body.is-fullscreen #assistant-status,
+body.is-fullscreen #task-status {
+  max-width: min(760px, calc(100vw - 64px));
+  padding: 18px 24px;
+  border-radius: 26px;
+  border-width: 1px;
+  box-shadow: 0 26px 60px rgba(0, 0, 0, 0.24);
+  font-size: clamp(18px, 1.45vw, 24px);
+  line-height: 1.55;
+  letter-spacing: 0.01em;
+}
+
+body.is-fullscreen #assistant-status {
+  bottom: 34px;
+}
+
+body.is-fullscreen #task-status {
+  bottom: 126px;
+  max-width: min(680px, calc(100vw - 96px));
+  padding: 14px 20px;
+  border-radius: 22px;
+  font-size: clamp(14px, 1.05vw, 17px);
+  line-height: 1.5;
+}
+
+@media (min-width: 1600px) {
+  body.is-fullscreen #assistant-status,
+  body.is-fullscreen #task-status {
+    backdrop-filter: blur(22px) saturate(136%);
+  }
+
+  body.is-fullscreen #assistant-status {
+    bottom: 42px;
+  }
+
+  body.is-fullscreen #task-status {
+    bottom: 146px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
+  #app::before,
   #window-chrome,
   #menu-button,
   .window-menu-item,
   #assistant-status,
   #task-status,
+  #workspace-panel,
   .toggle-track,
   .toggle-track::after {
     transition: none;

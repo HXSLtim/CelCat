@@ -21,7 +21,7 @@ type PendingReply = {
 
 type ProviderEvent =
   | { type: 'transcript'; text: string }
-  | { type: 'assistant-message'; text: string }
+  | { type: 'assistant-message'; text: string; isFinal?: boolean }
   | { type: 'assistant-audio'; pcmBase64: string; sampleRate: number; channels: number; format: 'pcm_s16le' }
   | { type: 'error'; message: string };
 
@@ -107,6 +107,9 @@ export class VolcengineRealtimeProviderClient implements CompanionProvider {
   private audioFramesSinceLastCommit = 0;
   private bufferedAssistantText = '';
   private bufferedAssistantTextTimer: NodeJS.Timeout | null = null;
+  private lastEmittedAssistantText = '';
+  private lastFinalAssistantText = '';
+  private lastFinalAssistantTextAt = 0;
   private hasCommittedUserAudio = false;
   private sessionStarted = false;
   private inputAudioReady = false;
@@ -295,15 +298,6 @@ export class VolcengineRealtimeProviderClient implements CompanionProvider {
 
     this.totalAudioFrameCount += 1;
     this.audioFramesSinceLastCommit += 1;
-    if (this.audioFramesSinceLastCommit === 1 || this.audioFramesSinceLastCommit % 25 === 0) {
-      logDebug('provider', 'Appending realtime audio frame', {
-        totalFrames: this.totalAudioFrameCount,
-        framesSinceCommit: this.audioFramesSinceLastCommit,
-        sampleRate: frame.sampleRate,
-        channels: frame.channels,
-      });
-    }
-
     this.sendMessage(
       buildTaskRequestFrame(this.sessionId, Buffer.from(frame.pcmBase64, 'base64')),
       'TaskRequest',
@@ -331,9 +325,6 @@ export class VolcengineRealtimeProviderClient implements CompanionProvider {
       return;
     }
 
-    logDebug('provider', 'Marked end of current buffered realtime audio', {
-      framesSinceCommit: this.audioFramesSinceLastCommit,
-    });
     this.hasCommittedUserAudio = this.hasCommittedUserAudio || this.audioFramesSinceLastCommit > 0;
     this.audioFramesSinceLastCommit = 0;
   }
@@ -382,15 +373,6 @@ export class VolcengineRealtimeProviderClient implements CompanionProvider {
       const assistantText = extractAssistantTextFromProviderPayload(payload);
       const assistantAudio = extractAssistantAudioChunk(response);
       const terminal = isTerminalProviderPayload(payload) || isTerminalEvent(responseEvent);
-      logDebug('provider', 'Received provider payload', {
-        event: responseEvent ?? payload.event ?? payload.type ?? payload.status ?? 'unknown',
-        messageType: response.messageType,
-        hasTranscript: Boolean(transcript),
-        hasAssistantText: Boolean(assistantText),
-        hasAssistantAudio: Boolean(assistantAudio),
-        terminal,
-      });
-
       if (responseEvent === 150) {
         this.sessionStarted = true;
       }
@@ -408,7 +390,7 @@ export class VolcengineRealtimeProviderClient implements CompanionProvider {
         });
       }
 
-      if (assistantAudio) {
+      if (assistantAudio && this.shouldEmitRealtimeAssistantOutputs()) {
         this.eventSink?.(assistantAudio);
       }
 
@@ -523,21 +505,22 @@ export class VolcengineRealtimeProviderClient implements CompanionProvider {
 
   private bufferAssistantText(text: string, terminal: boolean): void {
     this.bufferedAssistantText = mergeRealtimeAssistantText(this.bufferedAssistantText, text);
+    if (terminal) {
+      this.flushBufferedAssistantText(true);
+      return;
+    }
+
+    this.emitBufferedAssistantText(false);
     if (this.bufferedAssistantTextTimer) {
       clearTimeout(this.bufferedAssistantTextTimer);
     }
 
-    if (terminal) {
-      this.flushBufferedAssistantText();
-      return;
-    }
-
     this.bufferedAssistantTextTimer = setTimeout(() => {
-      this.flushBufferedAssistantText();
-    }, 900);
+      this.flushBufferedAssistantText(true);
+    }, 260);
   }
 
-  private flushBufferedAssistantText(): void {
+  private flushBufferedAssistantText(isFinal = true): void {
     if (this.bufferedAssistantTextTimer) {
       clearTimeout(this.bufferedAssistantTextTimer);
       this.bufferedAssistantTextTimer = null;
@@ -549,11 +532,11 @@ export class VolcengineRealtimeProviderClient implements CompanionProvider {
       return;
     }
 
-    this.bufferedAssistantText = '';
-    this.eventSink?.({
-      type: 'assistant-message',
-      text,
-    });
+    this.emitBufferedAssistantText(isFinal);
+    if (isFinal) {
+      this.bufferedAssistantText = '';
+      this.lastEmittedAssistantText = '';
+    }
   }
 
   private resetBufferedAssistantText(): void {
@@ -562,10 +545,41 @@ export class VolcengineRealtimeProviderClient implements CompanionProvider {
       this.bufferedAssistantTextTimer = null;
     }
     this.bufferedAssistantText = '';
+    this.lastEmittedAssistantText = '';
+  }
+
+  private emitBufferedAssistantText(isFinal: boolean): void {
+    const text = normalizeRealtimeAssistantEmission(
+      this.bufferedAssistantText.trim(),
+      isFinal ? this.lastFinalAssistantText : '',
+      isFinal ? this.lastFinalAssistantTextAt : 0,
+    );
+    if (!text) {
+      return;
+    }
+
+    if (!isFinal && text === this.lastEmittedAssistantText) {
+      return;
+    }
+
+    this.lastEmittedAssistantText = text;
+    if (isFinal) {
+      this.lastFinalAssistantText = text;
+      this.lastFinalAssistantTextAt = Date.now();
+    }
+    this.eventSink?.({
+      type: 'assistant-message',
+      text,
+      isFinal,
+    });
   }
 
   private shouldEmitRealtimeAssistantText(event?: number): boolean {
     if (this.pendingReply) {
+      return false;
+    }
+
+    if (!this.inputAudioReady && !this.hasCommittedUserAudio) {
       return false;
     }
 
@@ -574,6 +588,10 @@ export class VolcengineRealtimeProviderClient implements CompanionProvider {
     }
 
     return event === 550 || event === 559 || event === 551 || event === 552;
+  }
+
+  private shouldEmitRealtimeAssistantOutputs(): boolean {
+    return this.inputAudioReady || this.hasCommittedUserAudio || Boolean(this.pendingReply);
   }
 
   private waitForProviderEvent(event: number, timeoutMs: number): Promise<void> {
@@ -797,6 +815,30 @@ function mergeRealtimeAssistantText(current: string, next: string): string {
   }
 
   return `${currentText}${nextText}`;
+}
+
+function normalizeRealtimeAssistantEmission(
+  text: string,
+  previousFinalText: string,
+  previousFinalAt: number,
+): string {
+  if (!text) {
+    return '';
+  }
+
+  if (
+    isPunctuationOnlyText(text)
+    && previousFinalText
+    && Date.now() - previousFinalAt <= 1500
+  ) {
+    return `${previousFinalText}${text}`;
+  }
+
+  return text;
+}
+
+function isPunctuationOnlyText(text: string): boolean {
+  return /^[，。！？、；：,.!?;:~～…"'“”‘’\s()（）-]+$/.test(text);
 }
 
 function getRealtimeAssistantTextOverlap(current: string, next: string): number {

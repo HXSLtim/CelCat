@@ -1,7 +1,8 @@
 import * as PIXI from 'pixi.js';
 import { install as installPixiUnsafeEval } from '@pixi/unsafe-eval';
+import { inferAssistantExpressionDetail, type AssistantExpressionInference } from './assistantExpression';
 import { mergeAssistantMessages, shouldContinueAssistantStream } from './assistantMessageStream';
-import { getPixiApplicationOptions } from './pixiConfig';
+import { getPixiApplicationOptions, getViewportSize } from './pixiConfig';
 import {
   getNextMenuOpenState,
   getWindowMenuItems,
@@ -19,12 +20,15 @@ import { PcmAudioPlayer } from './voice/pcmAudioPlayer';
 import type { VoiceUiState } from './voice/voiceUi';
 import type { SessionEvent, SessionSnapshot } from '../types/session';
 import type { UserSettings } from '../types/settings';
-import type { TaskRecord } from '../types/tasks';
+import type { AgentWorkspaceArtifact, AgentWorkspaceCapability, AgentWorkspaceMemoryRef, AgentWorkspaceStep, TaskRecord } from '../types/tasks';
+import type { WindowStateEvent, WindowStateSnapshot } from '../types/windowState';
+import { safeConsoleLog } from '../shared/debugLogger';
 
 type Live2DManagerInstance = {
   loadModel(): Promise<void>;
   onTouch(position: PIXI.IPointData): void;
   refitModel(): void;
+  playAssistantExpression(expressionName: string | null, options?: { force?: boolean; intensity?: number }): boolean;
   setSpeechLevel(level: number): void;
 };
 
@@ -45,13 +49,17 @@ class DesktopCompanion {
   private voiceRecognition: VoiceRecognitionController | null = null;
   private assistantAudioPlayer = new PcmAudioPlayer(window);
   private menuOpen = false;
+  private isFullscreen = false;
   private dragSession: DragSession | null = null;
   private hoveringWindow = false;
   private activeTask: TaskRecord | null = null;
+  private workspaceTask: TaskRecord | null = null;
   private providerAudioSeen = false;
   private pendingAssistantStatusText = '';
   private assistantStatusFlushTimer: ReturnType<typeof setTimeout> | null = null;
   private lastAssistantStatusAt = 0;
+  private lastAssistantExpression: AssistantExpressionInference | null = null;
+  private lastAssistantExpressionAt = 0;
 
   constructor() {
     void this.init();
@@ -62,6 +70,7 @@ class DesktopCompanion {
       await this.setupPixi();
       await this.setupLive2D();
       this.setupEvents();
+      await this.bootstrapWindowState();
     } catch (error) {
       console.error('Renderer failed to initialize:', error);
       this.showFatalError(error);
@@ -71,7 +80,7 @@ class DesktopCompanion {
   async setupPixi(): Promise<void> {
     const canvas = document.getElementById('live2d-canvas') as HTMLCanvasElement;
     this.app = new PIXI.Application(
-      getPixiApplicationOptions(canvas, window.devicePixelRatio),
+      getPixiApplicationOptions(canvas, window.devicePixelRatio, window),
     );
   }
 
@@ -100,6 +109,7 @@ class DesktopCompanion {
       this.syncWindowChrome();
     });
     window.addEventListener('resize', () => {
+      this.resizePixiViewport();
       this.live2d?.refitModel();
     });
     this.app?.ticker.add(() => {
@@ -118,19 +128,7 @@ class DesktopCompanion {
       return;
     }
 
-    menuActions.innerHTML = '';
-    for (const item of getWindowMenuItems()) {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'window-menu-item';
-      button.dataset.action = item.id;
-      button.setAttribute('role', 'menuitem');
-      button.textContent = item.label;
-      button.addEventListener('click', () => {
-        this.handleMenuAction(item.id);
-      });
-      menuActions.appendChild(button);
-    }
+    this.renderWindowMenuItems();
 
     dragButton.addEventListener('pointerdown', async (event) => {
       event.preventDefault();
@@ -186,12 +184,33 @@ class DesktopCompanion {
       this.setMenuOpen(getNextMenuOpenState(this.menuOpen, 'close'));
     });
     document.addEventListener('keydown', (event) => {
+      if (event.key === 'F11') {
+        event.preventDefault();
+        void this.toggleFullscreen();
+        return;
+      }
+
       if (event.key === 'Escape') {
-        this.setMenuOpen(getNextMenuOpenState(this.menuOpen, 'close'));
+        if (this.menuOpen) {
+          this.setMenuOpen(getNextMenuOpenState(this.menuOpen, 'close'));
+          return;
+        }
+
+        if (this.isFullscreen) {
+          void this.setFullscreen(false);
+        }
       }
     });
 
     this.syncWindowChrome();
+  }
+
+  private async bootstrapWindowState(): Promise<void> {
+    const snapshot = await window.electronAPI.windowState.get();
+    this.syncWindowState(snapshot);
+    window.electronAPI.windowState.onChange((event) => {
+      this.handleWindowStateEvent(event);
+    });
   }
 
   private setupVoiceRecognition(): void {
@@ -205,9 +224,13 @@ class DesktopCompanion {
     );
   }
 
-  private handleMenuAction(action: WindowMenuActionId): void {
+  private async handleMenuAction(action: WindowMenuActionId): Promise<void> {
     if (action === 'refit-model') {
       this.live2d?.refitModel();
+    }
+
+    if (action === 'toggle-fullscreen') {
+      await this.toggleFullscreen();
     }
 
     if (action === 'close-window') {
@@ -228,6 +251,12 @@ class DesktopCompanion {
     menu?.setAttribute('aria-hidden', String(!nextOpen));
     menuButton?.setAttribute('aria-expanded', String(nextOpen));
     this.syncWindowChrome();
+  }
+
+  private handleWindowStateEvent(event: WindowStateEvent): void {
+    if (event.type === 'fullscreen-changed') {
+      this.syncWindowState(event.snapshot);
+    }
   }
 
   private async bootstrapAssistant(): Promise<void> {
@@ -280,7 +309,7 @@ class DesktopCompanion {
     }
 
     if (event.type === 'assistant-message') {
-      this.queueAssistantStatus(event.text);
+      this.queueAssistantStatus(event.text, event.isFinal !== false);
       return;
     }
 
@@ -308,7 +337,9 @@ class DesktopCompanion {
       : task;
 
     this.activeTask = activeTask ?? (this.activeTask?.id === task.id ? null : this.activeTask);
+    this.workspaceTask = task;
     this.syncTaskStatus(task);
+    this.syncWorkspace(task);
   }
 
   private syncSessionSnapshot(snapshot: SessionSnapshot): void {
@@ -332,11 +363,63 @@ class DesktopCompanion {
   private syncWindowChrome(): void {
     const chrome = document.getElementById('window-chrome');
     const chromeState = getWindowChromeState({
-      hovering: this.hoveringWindow,
+      hovering: this.hoveringWindow || this.isFullscreen,
       menuOpen: this.menuOpen,
     });
 
     chrome?.classList.toggle('chrome-visible', chromeState.visible);
+  }
+
+  private renderWindowMenuItems(): void {
+    const menuActions = document.getElementById('window-menu-actions');
+    if (!menuActions) {
+      return;
+    }
+
+    menuActions.innerHTML = '';
+    for (const item of getWindowMenuItems({ isFullscreen: this.isFullscreen })) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'window-menu-item';
+      button.dataset.action = item.id;
+      button.setAttribute('role', 'menuitem');
+      button.textContent = item.label;
+      button.addEventListener('click', () => {
+        void this.handleMenuAction(item.id);
+      });
+      menuActions.appendChild(button);
+    }
+  }
+
+  private async toggleFullscreen(): Promise<void> {
+    const snapshot = await window.electronAPI.windowState.toggleFullscreen();
+    this.syncWindowState(snapshot);
+  }
+
+  private async setFullscreen(nextIsFullscreen: boolean): Promise<void> {
+    const snapshot = await window.electronAPI.windowState.setFullscreen(nextIsFullscreen);
+    this.syncWindowState(snapshot);
+  }
+
+  private syncWindowState(snapshot: WindowStateSnapshot): void {
+    this.isFullscreen = snapshot.isFullscreen;
+    document.body.classList.toggle('is-fullscreen', snapshot.isFullscreen);
+    this.renderWindowMenuItems();
+    this.syncWindowChrome();
+    requestAnimationFrame(() => {
+      this.resizePixiViewport();
+      this.live2d?.refitModel();
+    });
+  }
+
+  private resizePixiViewport(): void {
+    if (!this.app) {
+      return;
+    }
+
+    const viewport = getViewportSize(window);
+    this.app.renderer.resize(viewport.width, viewport.height);
+    this.app.stage.hitArea = this.app.screen;
   }
 
   private syncVoiceUi(state: VoiceUiState): void {
@@ -370,8 +453,14 @@ class DesktopCompanion {
 
     if (latestTask) {
       this.activeTask = latestTask;
+      this.workspaceTask = latestTask;
       this.syncTaskStatus(latestTask);
+      this.syncWorkspace(latestTask);
+      return;
     }
+
+    this.workspaceTask = null;
+    this.syncWorkspace(null);
   }
 
   private syncTaskStatus(task: TaskRecord | null): void {
@@ -396,6 +485,303 @@ class DesktopCompanion {
           ? 'idle'
           : 'running';
     taskStatus.classList.add('is-visible');
+  }
+
+  private syncWorkspace(task: TaskRecord | null): void {
+    const workspacePanel = document.getElementById('workspace-panel');
+    const workspaceTitle = document.getElementById('workspace-title');
+    const workspaceModeBadge = document.getElementById('workspace-mode-badge');
+    const workspaceSummary = document.getElementById('workspace-summary');
+    const workspaceMission = document.getElementById('workspace-mission');
+    const workspaceSkills = document.getElementById('workspace-skills');
+    const workspaceMcps = document.getElementById('workspace-mcps');
+    const workspaceSteps = document.getElementById('workspace-steps');
+    const workspaceArtifacts = document.getElementById('workspace-artifacts');
+    const workspaceContext = document.getElementById('workspace-context');
+    const workspaceMemory = document.getElementById('workspace-memory');
+    const workspaceNotes = document.getElementById('workspace-notes');
+    const workspaceResult = document.getElementById('workspace-result');
+    const workspaceActions = document.getElementById('workspace-actions');
+    const workspaceApproveButton = document.getElementById('workspace-approve-button') as HTMLButtonElement | null;
+
+    if (
+      !workspacePanel
+      || !workspaceTitle
+      || !workspaceModeBadge
+      || !workspaceSummary
+      || !workspaceMission
+      || !workspaceSkills
+      || !workspaceMcps
+      || !workspaceSteps
+      || !workspaceArtifacts
+      || !workspaceContext
+      || !workspaceMemory
+      || !workspaceNotes
+      || !workspaceResult
+      || !workspaceActions
+    ) {
+      return;
+    }
+
+    if (!task?.workspace) {
+      workspacePanel.classList.remove('is-visible');
+      workspaceTitle.textContent = '等待任务';
+      workspaceModeBadge.textContent = '空闲';
+      workspaceSummary.textContent = '当你交给我一个后台任务时，这里会显示 agent 的执行工作区、步骤、技能和 MCP 能力。';
+      workspaceMission.textContent = '暂无任务目标';
+      workspaceResult.textContent = '任务完成后，这里会显示整理好的结果摘要。';
+      this.renderWorkspaceCapabilities(workspaceSkills, []);
+      this.renderWorkspaceCapabilities(workspaceMcps, []);
+      this.renderWorkspaceSteps(workspaceSteps, []);
+      this.renderWorkspaceArtifacts(workspaceArtifacts, []);
+      workspaceContext.textContent = '任务执行过程中，这里会生成压缩上下文。';
+      this.renderWorkspaceMemory(workspaceMemory, []);
+      this.renderWorkspaceNotes(workspaceNotes, []);
+      workspaceActions.classList.remove('is-visible');
+      return;
+    }
+
+    workspacePanel.classList.add('is-visible');
+    workspaceTitle.textContent = task.title;
+    workspaceModeBadge.textContent = this.getWorkspaceModeLabel(task);
+    workspaceSummary.textContent = task.workspace.summary;
+    workspaceMission.textContent = task.workspace.mission;
+    workspaceResult.textContent = task.resultSummary || '任务仍在推进中，完成后会在这里沉淀结果。';
+    this.renderWorkspaceCapabilities(workspaceSkills, task.workspace.skills);
+    this.renderWorkspaceCapabilities(workspaceMcps, task.workspace.mcps);
+    this.renderWorkspaceSteps(workspaceSteps, task.workspace.steps, task.workspace);
+    this.renderWorkspaceArtifacts(workspaceArtifacts, task.workspace.artifacts);
+    workspaceContext.textContent = task.workspace.compressedContext || '当前还没有生成压缩上下文。';
+    this.renderWorkspaceMemory(workspaceMemory, task.workspace.memoryRefs);
+    this.renderWorkspaceNotes(workspaceNotes, task.workspace.notes);
+
+    const shouldShowApprove = task.status === 'waiting_user';
+    workspaceActions.classList.toggle('is-visible', shouldShowApprove);
+    if (workspaceApproveButton) {
+      workspaceApproveButton.disabled = !shouldShowApprove;
+      workspaceApproveButton.onclick = shouldShowApprove
+        ? async () => {
+          workspaceApproveButton.disabled = true;
+          await window.electronAPI.tasks.approve(task.id);
+        }
+        : null;
+    }
+  }
+
+  private renderWorkspaceCapabilities(
+    container: HTMLElement,
+    capabilities: AgentWorkspaceCapability[],
+  ): void {
+    container.innerHTML = '';
+    if (!capabilities.length) {
+      container.appendChild(this.createWorkspaceEmpty('当前没有选中的能力。'));
+      return;
+    }
+
+    for (const capability of capabilities) {
+      const item = document.createElement('div');
+      item.className = 'workspace-chip';
+
+      const label = document.createElement('span');
+      label.className = 'workspace-chip-label';
+      label.textContent = capability.label;
+
+      const reason = document.createElement('span');
+      reason.className = 'workspace-chip-reason';
+      reason.textContent = capability.reason;
+
+      item.append(label, reason);
+      container.appendChild(item);
+    }
+  }
+
+  private renderWorkspaceSteps(
+    container: HTMLElement,
+    steps: AgentWorkspaceStep[],
+    workspace?: TaskRecord['workspace'],
+  ): void {
+    container.innerHTML = '';
+    if (!steps.length) {
+      container.appendChild(this.createWorkspaceEmpty('计划生成后，这里会出现步骤列表。'));
+      return;
+    }
+
+    for (const step of steps) {
+      const item = document.createElement('div');
+      item.className = 'workspace-step';
+      item.dataset.status = step.status;
+
+      const head = document.createElement('div');
+      head.className = 'workspace-step-head';
+
+      const title = document.createElement('span');
+      title.className = 'workspace-step-title';
+      title.textContent = step.title;
+
+      const status = document.createElement('span');
+      status.className = 'workspace-step-status';
+      status.textContent = this.getWorkspaceStepStatusLabel(step.status);
+
+      head.append(title, status);
+
+      const summary = document.createElement('div');
+      summary.className = 'workspace-step-summary';
+      summary.textContent = step.summary;
+
+      item.append(head, summary);
+
+      if (step.capabilityId) {
+        const capability = document.createElement('div');
+        capability.className = 'workspace-step-capability';
+        const capabilityLabel = this.getWorkspaceCapabilityLabel(workspace, step.capabilityId, step.capabilityType);
+        capability.textContent = `${step.capabilityType === 'mcp' ? 'MCP' : 'Skill'}: ${capabilityLabel}`;
+        item.appendChild(capability);
+      }
+
+      container.appendChild(item);
+    }
+  }
+
+  private getWorkspaceCapabilityLabel(
+    workspace: TaskRecord['workspace'] | undefined,
+    capabilityId: string,
+    capabilityType?: AgentWorkspaceStep['capabilityType'],
+  ): string {
+    if (!workspace) {
+      return capabilityId;
+    }
+
+    const candidates = capabilityType === 'mcp'
+      ? workspace.mcps
+      : capabilityType === 'skill'
+        ? workspace.skills
+        : [...workspace.skills, ...workspace.mcps];
+
+    return candidates.find((capability) => capability.id === capabilityId)?.label || capabilityId;
+  }
+
+  private renderWorkspaceNotes(
+    container: HTMLElement,
+    notes: string[],
+  ): void {
+    container.innerHTML = '';
+    if (!notes.length) {
+      container.appendChild(this.createWorkspaceEmpty('当前没有额外备注。'));
+      return;
+    }
+
+    for (const note of notes) {
+      const item = document.createElement('div');
+      item.className = 'workspace-note';
+      item.textContent = note;
+      container.appendChild(item);
+    }
+  }
+
+  private renderWorkspaceArtifacts(
+    container: HTMLElement,
+    artifacts: AgentWorkspaceArtifact[],
+  ): void {
+    container.innerHTML = '';
+    if (!artifacts.length) {
+      container.appendChild(this.createWorkspaceEmpty('能力执行后，这里会展示工作区产物和命令输出。'));
+      return;
+    }
+
+    for (const artifact of artifacts) {
+      const item = document.createElement('div');
+      item.className = 'workspace-artifact';
+      item.dataset.tone = artifact.tone;
+
+      const label = document.createElement('div');
+      label.className = 'workspace-artifact-label';
+      label.textContent = artifact.label;
+
+      const content = document.createElement('div');
+      content.className = 'workspace-artifact-content';
+      content.textContent = artifact.content;
+
+      item.append(label, content);
+      container.appendChild(item);
+    }
+  }
+
+  private renderWorkspaceMemory(
+    container: HTMLElement,
+    memoryRefs: AgentWorkspaceMemoryRef[],
+  ): void {
+    container.innerHTML = '';
+    if (!memoryRefs.length) {
+      container.appendChild(this.createWorkspaceEmpty('完成任务后，这里会记录长期记忆和任务记忆文档。'));
+      return;
+    }
+
+    for (const memoryRef of memoryRefs) {
+      const item = document.createElement('div');
+      item.className = 'workspace-memory-item';
+
+      const label = document.createElement('div');
+      label.className = 'workspace-memory-label';
+      label.textContent = memoryRef.label;
+
+      const summary = document.createElement('div');
+      summary.className = 'workspace-memory-summary';
+      summary.textContent = memoryRef.summary;
+
+      const location = document.createElement('div');
+      location.className = 'workspace-memory-path';
+      location.textContent = memoryRef.path;
+
+      item.append(label, summary, location);
+      container.appendChild(item);
+    }
+  }
+
+  private createWorkspaceEmpty(text: string): HTMLElement {
+    const item = document.createElement('div');
+    item.className = 'workspace-empty';
+    item.textContent = text;
+    return item;
+  }
+
+  private getWorkspaceModeLabel(task: TaskRecord): string {
+    if (task.status === 'waiting_user') {
+      return '等待确认';
+    }
+
+    if (task.status === 'completed') {
+      return '已完成';
+    }
+
+    if (task.status === 'failed') {
+      return '失败';
+    }
+
+    if (task.status === 'cancelled') {
+      return '已取消';
+    }
+
+    return task.workspace?.mode === 'planning'
+      ? '规划中'
+      : task.workspace?.mode === 'executing'
+        ? '执行中'
+        : '运行中';
+  }
+
+  private getWorkspaceStepStatusLabel(status: AgentWorkspaceStep['status']): string {
+    if (status === 'in_progress') {
+      return '运行中';
+    }
+
+    if (status === 'completed') {
+      return '完成';
+    }
+
+    if (status === 'blocked') {
+      return '阻塞';
+    }
+
+    return '待执行';
   }
 
   private syncAutoExecuteSettings(settings: UserSettings): void {
@@ -426,7 +812,7 @@ class DesktopCompanion {
     window.speechSynthesis.speak(utterance);
   }
 
-  private queueAssistantStatus(text: string): void {
+  private queueAssistantStatus(text: string, isFinal = true): void {
     const now = Date.now();
     if (shouldContinueAssistantStream(this.lastAssistantStatusAt, now, this.pendingAssistantStatusText)) {
       this.pendingAssistantStatusText = mergeAssistantMessages(this.pendingAssistantStatusText, text);
@@ -435,13 +821,19 @@ class DesktopCompanion {
     }
 
     this.lastAssistantStatusAt = now;
+    this.applyAssistantExpression(this.pendingAssistantStatusText, isFinal);
     if (this.assistantStatusFlushTimer) {
       clearTimeout(this.assistantStatusFlushTimer);
     }
 
+    if (isFinal) {
+      this.flushAssistantStatus();
+      return;
+    }
+
     this.assistantStatusFlushTimer = setTimeout(() => {
       this.flushAssistantStatus();
-    }, 320);
+    }, 180);
   }
 
   private flushAssistantStatus(): void {
@@ -465,6 +857,67 @@ class DesktopCompanion {
       this.assistantStatusFlushTimer = null;
     }
     this.pendingAssistantStatusText = '';
+    this.lastAssistantExpression = null;
+    this.lastAssistantExpressionAt = 0;
+  }
+
+  private applyAssistantExpression(text: string, isFinal: boolean): void {
+    const inference = inferAssistantExpressionDetail(text);
+    if (!inference) {
+      return;
+    }
+
+    const now = Date.now();
+    const shouldApply = this.shouldApplyAssistantExpression(inference, now, isFinal);
+    if (!shouldApply) {
+      return;
+    }
+
+    const applied = this.live2d?.playAssistantExpression(inference.name, {
+      force: isFinal,
+      intensity: Math.max(0.45, Math.min(1, inference.confidence + 0.12)),
+    });
+    if (!applied) {
+      return;
+    }
+
+    this.lastAssistantExpression = inference;
+    this.lastAssistantExpressionAt = now;
+    safeConsoleLog(
+      `[celcat:emotion] assistant expression ${JSON.stringify({
+        expression: inference.name,
+        confidence: Number(inference.confidence.toFixed(2)),
+        score: Number(inference.score.toFixed(2)),
+        phase: isFinal ? 'final' : 'stream',
+        cues: inference.matchedCues,
+        text,
+      })}`,
+    );
+  }
+
+  private shouldApplyAssistantExpression(
+    nextInference: AssistantExpressionInference,
+    now: number,
+    isFinal: boolean,
+  ): boolean {
+    if (isFinal || !this.lastAssistantExpression) {
+      return true;
+    }
+
+    if (nextInference.name === this.lastAssistantExpression.name) {
+      return now - this.lastAssistantExpressionAt > 1200 && nextInference.confidence >= 0.72;
+    }
+
+    if (nextInference.confidence < 0.52) {
+      return false;
+    }
+
+    if (now - this.lastAssistantExpressionAt < 360) {
+      return false;
+    }
+
+    return nextInference.confidence >= this.lastAssistantExpression.confidence + 0.12
+      || nextInference.score >= this.lastAssistantExpression.score + 1;
   }
 
   private showFatalError(error: unknown): void {

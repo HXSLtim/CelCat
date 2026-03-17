@@ -17,6 +17,21 @@ npm install
 npm start
 ```
 
+## Workspace
+
+- Development mode stores the agent workspace in `./agentWorkspace`.
+- You can override it with `CELCAT_WORKSPACE_DIR`.
+- Packaged installs fall back to `Documents/CelCat/agentWorkspace` unless overridden.
+
+## Packaging
+
+```bash
+npm run dist:win
+```
+
+- Installer output: `release/`
+- Installer type: NSIS (`setup.exe`)
+
 ## Architecture
 
 - **Main Process**: Window management, system tray

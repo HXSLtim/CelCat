@@ -126,14 +126,6 @@ export class SessionManager {
 
     this.totalForwardedAudioFrames += 1;
     this.forwardedFramesSinceLastCommit += 1;
-    if (this.forwardedFramesSinceLastCommit === 1 || this.forwardedFramesSinceLastCommit % 25 === 0) {
-      logDebug('session', 'Forwarding streaming audio frame batch', {
-        totalFrames: this.totalForwardedAudioFrames,
-        framesSinceCommit: this.forwardedFramesSinceLastCommit,
-        sampleRate: frame.sampleRate,
-        channels: frame.channels,
-      });
-    }
     await this.dependencies.companionProvider.appendInputAudioFrame(frame);
   }
 
@@ -142,9 +134,6 @@ export class SessionManager {
       return;
     }
 
-    logDebug('session', 'Committing buffered realtime audio', {
-      framesSinceCommit: this.forwardedFramesSinceLastCommit,
-    });
     this.forwardedFramesSinceLastCommit = 0;
     await this.dependencies.companionProvider.commitInputAudio();
   }
@@ -173,17 +162,24 @@ export class SessionManager {
   private handleProviderEvent(event: {
     type: 'transcript' | 'assistant-message' | 'assistant-audio' | 'error';
     text?: string;
+    isFinal?: boolean;
     message?: string;
     pcmBase64?: string;
     sampleRate?: number;
     channels?: number;
     format?: 'pcm_s16le';
   }): void {
-    logDebug('session', 'Received provider event', {
-      type: event.type,
-      text: event.text ? truncateDebugText(event.text) : undefined,
-      message: event.message,
-    });
+    if (
+      event.type === 'transcript'
+      || event.type === 'error'
+      || (event.type === 'assistant-message' && event.isFinal !== false)
+    ) {
+      logDebug('session', 'Received provider event', {
+        type: event.type,
+        text: event.text ? truncateDebugText(event.text) : undefined,
+        message: event.message,
+      });
+    }
     if (event.type === 'transcript' && event.text) {
       this.setSnapshot({
         lastTranscript: event.text,
@@ -203,11 +199,14 @@ export class SessionManager {
       this.dependencies.emitEvent({
         type: 'assistant-message',
         text: event.text,
+        isFinal: event.isFinal,
       });
-      this.setSnapshot({
-        status: 'listening',
-        error: '',
-      });
+      if (event.isFinal !== false) {
+        this.setSnapshot({
+          status: 'listening',
+          error: '',
+        });
+      }
       return;
     }
 

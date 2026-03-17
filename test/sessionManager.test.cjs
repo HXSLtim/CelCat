@@ -194,6 +194,58 @@ test('SessionManager forwards provider events into the session event stream', as
   );
 });
 
+test('SessionManager keeps speaking state during partial provider assistant text and settles on final text', async () => {
+  const emittedEvents = [];
+  let eventSink = null;
+
+  const sessionManager = new SessionManager({
+    transcribeAudio: async () => ({ text: '你好' }),
+    orchestrator: {
+      async handleTranscript() {
+        return {
+          relatedTask: null,
+          companionRequest: null,
+          events: [],
+        };
+      },
+    },
+    companionProvider: {
+      setEventSink(listener) {
+        eventSink = listener;
+      },
+      async connect() {},
+      async disconnect() {},
+      async startSession() {},
+      async generateReply() {
+        return null;
+      },
+      async appendInputAudioFrame() {},
+      async commitInputAudio() {},
+      isEnabled() {
+        return true;
+      },
+    },
+    emitEvent(event) {
+      emittedEvents.push(event);
+    },
+  });
+
+  await sessionManager.startSession();
+  eventSink({ type: 'assistant-message', text: '我生气', isFinal: false });
+  assert.equal(sessionManager.getSnapshot().status, 'speaking');
+
+  eventSink({ type: 'assistant-message', text: '我生气起来可是很吓人的！哼！', isFinal: true });
+  assert.equal(sessionManager.getSnapshot().status, 'listening');
+  assert.equal(
+    emittedEvents.some((event) => event.type === 'assistant-message' && event.text === '我生气' && event.isFinal === false),
+    true,
+  );
+  assert.equal(
+    emittedEvents.some((event) => event.type === 'assistant-message' && event.text === '我生气起来可是很吓人的！哼！' && event.isFinal === true),
+    true,
+  );
+});
+
 test('SessionManager stays in browser-only mode when realtime provider is disabled', async () => {
   let forwardedAudioFrames = 0;
   let committedAudioBuffers = 0;

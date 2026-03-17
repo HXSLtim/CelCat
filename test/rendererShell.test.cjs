@@ -31,3 +31,12 @@ test('renderer shell loads the Cubism runtime before booting the renderer bundle
     'Cubism runtime must be loaded before the renderer bootstrap script',
   );
 });
+
+test('renderer shell includes an agent workspace panel', () => {
+  const htmlPath = path.join(__dirname, '..', 'src', 'renderer', 'index.html');
+  const html = fs.readFileSync(htmlPath, 'utf8');
+
+  assert.match(html, /id="workspace-panel"/, 'index.html should include a workspace panel');
+  assert.match(html, /Agent 工作区/, 'workspace panel should expose an agent workspace heading');
+  assert.match(html, /任务目标/, 'workspace panel should use localized section titles');
+});

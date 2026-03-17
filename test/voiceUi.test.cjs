@@ -10,6 +10,7 @@ test('renderer shell exposes a unified conversation status panel and task progre
   assert.doesNotMatch(html, /id="voice-status"/, 'index.html should no longer render a separate voice status panel');
   assert.match(html, /id="assistant-status"/, 'index.html should include a unified conversation status panel');
   assert.match(html, /id="task-status"/, 'index.html should include a background task status panel');
+  assert.match(html, /id="workspace-panel"/, 'index.html should include a dedicated agent workspace panel');
 });
 
 test('styles keep the unified conversation and task status panels reactive without a microphone button', () => {
@@ -19,4 +20,5 @@ test('styles keep the unified conversation and task status panels reactive witho
   assert.match(css, /#assistant-status[\s\S]*opacity:\s*0/, 'conversation status panel should stay hidden until needed');
   assert.match(css, /#assistant-status\.is-visible[\s\S]*opacity:\s*1/, 'conversation status panel should reveal itself when feedback exists');
   assert.match(css, /#task-status[\s\S]*bottom:\s*72px/, 'task status panel should stack above the conversation status');
+  assert.match(css, /#workspace-panel[\s\S]*opacity:\s*0/, 'workspace panel should stay hidden until a task workspace is available');
 });

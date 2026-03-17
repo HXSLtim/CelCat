@@ -1,6 +1,7 @@
 import type { SessionEvent, SessionSnapshot, StreamingAudioFrame, UserAudioPayload } from './session';
 import type { UserSettings } from './settings';
 import type { TaskRecord } from './tasks';
+import type { WindowStateEvent, WindowStateSnapshot } from './windowState';
 
 type Unsubscribe = () => void;
 
@@ -8,6 +9,12 @@ type ElectronApi = {
   windowDrag: {
     getPosition(): Promise<[number, number]>;
     setPosition(nextX: number, nextY: number): void;
+  };
+  windowState: {
+    get(): Promise<WindowStateSnapshot>;
+    setFullscreen(nextIsFullscreen: boolean): Promise<WindowStateSnapshot>;
+    toggleFullscreen(): Promise<WindowStateSnapshot>;
+    onChange(listener: (event: WindowStateEvent) => void): Unsubscribe;
   };
   session: {
     start(): Promise<SessionSnapshot>;
@@ -22,6 +29,7 @@ type ElectronApi = {
     list(): Promise<TaskRecord[]>;
     get(taskId: string): Promise<TaskRecord | null>;
     cancel(taskId: string): Promise<TaskRecord | null>;
+    approve(taskId: string): Promise<TaskRecord | null>;
     onUpdate(listener: (task: TaskRecord) => void): Unsubscribe;
   };
   settings: {

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, session } = require('electron');
+const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, session, screen } = require('electron');
 const path = require('path');
 import type { SessionEvent } from './types/session';
 import type { TaskRecord } from './types/tasks';
@@ -14,16 +14,81 @@ const { UserSettingsStore } = require('./main-process/config/userSettings');
 const { ConversationOrchestrator } = require('./main-process/orchestrator/conversationOrchestrator');
 const { SessionManager } = require('./main-process/realtime/sessionManager');
 const { VolcengineRealtimeProviderClient } = require('./main-process/realtime/providerClient');
+const { readAgentModelConfig, getSafeAgentModelMeta } = require('./main-process/agent/agentModelConfig');
+const { AgentMemoryStore } = require('./main-process/agent/agentMemoryStore');
+const { resolveAppWorkspaceRoot } = require('./main-process/config/appWorkspace');
 const { isDebugLoggingEnabled, logDebug, safeConsoleError, safeConsoleLog } = require('./shared/debugLogger');
+import type { WindowStateEvent, WindowStateSnapshot } from './types/windowState';
 
 let mainWindow: Electron.BrowserWindow | null;
 let tray: Electron.Tray | null = null;
 let taskStore: InstanceType<typeof InMemoryTaskStore> | null = null;
 let taskRunner: InstanceType<typeof TaskRunner> | null = null;
 let settingsStore: InstanceType<typeof UserSettingsStore> | null = null;
+let memoryStore: InstanceType<typeof AgentMemoryStore> | null = null;
 let orchestrator: InstanceType<typeof ConversationOrchestrator> | null = null;
 let sessionManager: InstanceType<typeof SessionManager> | null = null;
 let companionProvider: InstanceType<typeof VolcengineRealtimeProviderClient> | null = null;
+const DEFAULT_WINDOW_SIZE = { width: 300, height: 400 };
+let isCompanionFullscreen = false;
+let windowedBounds: Electron.Rectangle | null = null;
+
+function getWindowStateSnapshot(): WindowStateSnapshot {
+  return {
+    isFullscreen: isCompanionFullscreen,
+  };
+}
+
+function sendWindowState(snapshot = getWindowStateSnapshot()): void {
+  const event: WindowStateEvent = {
+    type: 'fullscreen-changed',
+    snapshot,
+  };
+  mainWindow?.webContents.send('window:event', event);
+}
+
+function syncWindowModeForFullscreen(isFullscreen: boolean): void {
+  if (!mainWindow) {
+    return;
+  }
+
+  mainWindow.setAlwaysOnTop(!isFullscreen);
+  mainWindow.setResizable(false);
+}
+
+function setMainWindowFullscreen(nextIsFullscreen: boolean): WindowStateSnapshot {
+  if (!mainWindow) {
+    return { isFullscreen: false };
+  }
+
+  if (isCompanionFullscreen === nextIsFullscreen) {
+    return getWindowStateSnapshot();
+  }
+
+  if (nextIsFullscreen) {
+    windowedBounds = mainWindow.getBounds();
+    const targetDisplay = screen.getDisplayMatching(windowedBounds);
+    const { x, y, width, height } = targetDisplay.workArea;
+    isCompanionFullscreen = true;
+    syncWindowModeForFullscreen(true);
+    mainWindow.setBounds({ x, y, width, height }, true);
+    mainWindow.show();
+    sendWindowState({ isFullscreen: true });
+    return { isFullscreen: true };
+  }
+
+  const restoredBounds = windowedBounds ?? {
+    x: mainWindow.getBounds().x,
+    y: mainWindow.getBounds().y,
+    width: DEFAULT_WINDOW_SIZE.width,
+    height: DEFAULT_WINDOW_SIZE.height,
+  };
+  isCompanionFullscreen = false;
+  syncWindowModeForFullscreen(nextIsFullscreen);
+  mainWindow.setBounds(restoredBounds, true);
+  sendWindowState({ isFullscreen: false });
+  return { isFullscreen: false };
+}
 
 function createWindow(): void {
   const isDev = process.argv.includes('--dev');
@@ -31,12 +96,13 @@ function createWindow(): void {
   const shouldMirrorRendererLogs = isDev || debugLoggingEnabled;
 
   mainWindow = new BrowserWindow({
-    width: 300,
-    height: 400,
+    width: DEFAULT_WINDOW_SIZE.width,
+    height: DEFAULT_WINDOW_SIZE.height,
     transparent: true,
     frame: false,
     alwaysOnTop: true,
     resizable: false,
+    fullscreenable: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: true,
@@ -59,7 +125,7 @@ function createWindow(): void {
   }
 
   if (isDev) {
-    mainWindow!.webContents.openDevTools();
+    mainWindow!.webContents.openDevTools({ mode: 'detach' });
   }
   mainWindow!.setIgnoreMouseEvents(false);
 }
@@ -88,6 +154,18 @@ ipcMain.on('window-drag:set-position', (_event: Electron.IpcMainEvent, nextX: nu
   }
 
   mainWindow?.setPosition(Math.round(nextX), Math.round(nextY));
+});
+
+ipcMain.handle('window-state:get', () => {
+  return getWindowStateSnapshot();
+});
+
+ipcMain.handle('window-state:set-fullscreen', (_event: Electron.IpcMainInvokeEvent, nextIsFullscreen: boolean) => {
+  return setMainWindowFullscreen(Boolean(nextIsFullscreen));
+});
+
+ipcMain.handle('window-state:toggle-fullscreen', () => {
+  return setMainWindowFullscreen(!isCompanionFullscreen);
 });
 
 ipcMain.handle('session:start', async () => {
@@ -133,6 +211,10 @@ ipcMain.handle('task:cancel', (_event: Electron.IpcMainInvokeEvent, taskId: stri
   return taskRunner?.cancelTask(taskId) ?? null;
 });
 
+ipcMain.handle('task:approve', (_event: Electron.IpcMainInvokeEvent, taskId: string) => {
+  return taskRunner?.approveTask(taskId) ?? null;
+});
+
 ipcMain.handle('settings:get', () => {
   return settingsStore?.get() ?? { autoExecute: false };
 });
@@ -154,10 +236,14 @@ app.whenReady().then(() => {
   if (process.env.VOLCENGINE_APP_KEY) {
     logDebug('main', 'Ignoring VOLCENGINE_APP_KEY from env; realtime protocol uses a fixed app key');
   }
+  logDebug('main', 'Agent model configuration', getSafeAgentModelMeta(readAgentModelConfig(process.env)));
   logDebug('main', 'Application bootstrapping');
+  const workspaceRoot = resolveAppWorkspaceRoot(app, process.env, process.cwd());
+  logDebug('main', 'Resolved app workspace root', { workspaceRoot });
   taskStore = new InMemoryTaskStore();
-  taskRunner = new TaskRunner(taskStore);
-  settingsStore = new UserSettingsStore(app.getPath('userData'));
+  memoryStore = new AgentMemoryStore(workspaceRoot);
+  taskRunner = new TaskRunner(taskStore, undefined, memoryStore);
+  settingsStore = new UserSettingsStore(workspaceRoot);
   orchestrator = new ConversationOrchestrator(taskStore, taskRunner, settingsStore);
   companionProvider = new VolcengineRealtimeProviderClient();
   sessionManager = new SessionManager({
@@ -165,9 +251,6 @@ app.whenReady().then(() => {
     orchestrator,
     companionProvider,
     emitEvent: (event: SessionEvent) => {
-      logDebug('main', 'Forwarding session event to renderer', {
-        type: event.type,
-      });
       mainWindow?.webContents.send('session:event', event);
     },
   });

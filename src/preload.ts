@@ -2,9 +2,10 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type { SessionEvent, SessionSnapshot, StreamingAudioFrame, UserAudioPayload } from './types/session';
 import type { UserSettings } from './types/settings';
 import type { TaskRecord } from './types/tasks';
+import type { WindowStateEvent, WindowStateSnapshot } from './types/windowState';
 
 function subscribe<EventPayload>(
-  channel: 'session:event' | 'task:event',
+  channel: 'session:event' | 'task:event' | 'window:event',
   listener: (payload: EventPayload) => void,
 ): () => void {
   const wrappedListener = (_event: Electron.IpcRendererEvent, payload: EventPayload) => {
@@ -24,6 +25,20 @@ const electronApi = {
     },
     setPosition(nextX: number, nextY: number): void {
       ipcRenderer.send('window-drag:set-position', nextX, nextY);
+    },
+  },
+  windowState: {
+    get(): Promise<WindowStateSnapshot> {
+      return ipcRenderer.invoke('window-state:get');
+    },
+    setFullscreen(nextIsFullscreen: boolean): Promise<WindowStateSnapshot> {
+      return ipcRenderer.invoke('window-state:set-fullscreen', nextIsFullscreen);
+    },
+    toggleFullscreen(): Promise<WindowStateSnapshot> {
+      return ipcRenderer.invoke('window-state:toggle-fullscreen');
+    },
+    onChange(listener: (event: WindowStateEvent) => void): () => void {
+      return subscribe('window:event', listener);
     },
   },
   session: {
@@ -58,6 +73,9 @@ const electronApi = {
     },
     cancel(taskId: string): Promise<TaskRecord | null> {
       return ipcRenderer.invoke('task:cancel', taskId);
+    },
+    approve(taskId: string): Promise<TaskRecord | null> {
+      return ipcRenderer.invoke('task:approve', taskId);
     },
     onUpdate(listener: (task: TaskRecord) => void): () => void {
       return subscribe('task:event', listener);

@@ -10,6 +10,8 @@ import {
   isPointInsideBounds,
   type TapReaction,
 } from './interactionFeedback';
+import { buildEmotionParameterOffsets } from './emotionMotion';
+import type { AssistantExpressionName } from '../assistantExpression';
 
 const { Live2DModel } = require('pixi-live2d-display/cubism4') as {
   Live2DModel: {
@@ -39,6 +41,17 @@ export class Live2DManager {
   private lipSyncParameterIds: string[] = [];
   private speechLevel = 0;
   private mouthValue = 0;
+  private speechHookInstalled = false;
+  private activeEmotion: AssistantExpressionName | null = null;
+  private emotionIntensity = 0;
+  private targetEmotionIntensity = 0;
+  private emotionActivatedAt = 0;
+  private emotionExpiresAt = 0;
+  private lastAssistantExpression: string | null = null;
+  private lastAssistantExpressionAt = 0;
+  private readonly applySpeechParametersOnModelUpdate = () => {
+    this.applyOverlayParameters();
+  };
 
   constructor(app: PIXI.Application) {
     this.app = app;
@@ -64,6 +77,7 @@ export class Live2DManager {
       this.model = await Live2DModel.from(getModelJsonPath(), getModelLoadOptions());
       console.log('Live2D model loaded successfully:', this.model);
       this.lipSyncParameterIds = this.getLipSyncParameterIds();
+      this.installSpeechHook();
 
       this.app.stage.addChild(this.model);
       this.placeModel();
@@ -156,6 +170,10 @@ export class Live2DManager {
 
       this.applyIdleMotion(time);
       this.updateSpeechAnimation();
+      this.updateEmotionAnimation();
+      if (!this.speechHookInstalled) {
+        this.applyOverlayParameters();
+      }
       this.updateTapFeedback();
     });
   }
@@ -212,6 +230,27 @@ export class Live2DManager {
     this.placeModel();
   }
 
+  playAssistantExpression(
+    expressionName: string | null,
+    options?: { force?: boolean; intensity?: number },
+  ): boolean {
+    if (!expressionName) {
+      return false;
+    }
+
+    const now = performance.now();
+    const isSameExpression = this.lastAssistantExpression === expressionName;
+    if (!options?.force && isSameExpression && now - this.lastAssistantExpressionAt < 900) {
+      return false;
+    }
+
+    this.executeAction(expressionName);
+    this.activateEmotion(expressionName as AssistantExpressionName, options?.intensity ?? 0.7, Boolean(options?.force));
+    this.lastAssistantExpression = expressionName;
+    this.lastAssistantExpressionAt = now;
+    return true;
+  }
+
   setSpeechLevel(level: number): void {
     this.speechLevel = Math.max(0, Math.min(1, level));
   }
@@ -232,15 +271,39 @@ export class Live2DManager {
   }
 
   private updateSpeechAnimation(): void {
-    if (!this.model?.internalModel?.coreModel) {
-      return;
-    }
-
     const smoothing = this.speechLevel > this.mouthValue ? 0.62 : 0.18;
     this.mouthValue += (this.speechLevel - this.mouthValue) * smoothing;
 
     if (this.speechLevel < 0.01 && this.mouthValue < 0.01) {
       this.mouthValue = 0;
+    }
+  }
+
+  private updateEmotionAnimation(): void {
+    const now = performance.now();
+    if (!this.activeEmotion) {
+      this.targetEmotionIntensity = 0;
+    } else if (now >= this.emotionExpiresAt) {
+      this.targetEmotionIntensity = 0;
+    }
+
+    const smoothing = this.targetEmotionIntensity > this.emotionIntensity ? 0.2 : 0.08;
+    this.emotionIntensity += (this.targetEmotionIntensity - this.emotionIntensity) * smoothing;
+
+    if (this.emotionIntensity < 0.02 && this.targetEmotionIntensity === 0) {
+      this.emotionIntensity = 0;
+      this.activeEmotion = null;
+    }
+  }
+
+  private applyOverlayParameters(): void {
+    this.applySpeechParameters();
+    this.applyEmotionParameters();
+  }
+
+  private applySpeechParameters(): void {
+    if (!this.model?.internalModel?.coreModel) {
+      return;
     }
 
     for (const parameterId of this.lipSyncParameterIds) {
@@ -250,6 +313,47 @@ export class Live2DManager {
     if (!this.lipSyncParameterIds.length) {
       this.addParameter('ParamA', this.mouthValue, 0.9);
     }
+  }
+
+  private applyEmotionParameters(): void {
+    if (!this.model?.internalModel?.coreModel || !this.activeEmotion || this.emotionIntensity <= 0.01) {
+      return;
+    }
+
+    const timeSinceActivated = performance.now() - this.emotionActivatedAt;
+    const offsets = buildEmotionParameterOffsets(
+      this.activeEmotion,
+      this.emotionIntensity,
+      timeSinceActivated,
+    );
+
+    for (const offset of offsets) {
+      this.addParameter(offset.id, offset.value, offset.weight ?? 1);
+    }
+  }
+
+  private activateEmotion(expressionName: AssistantExpressionName, intensity: number, isFinal: boolean): void {
+    const clampedIntensity = Math.max(0.35, Math.min(1, intensity));
+    const now = performance.now();
+
+    this.activeEmotion = expressionName;
+    this.targetEmotionIntensity = clampedIntensity;
+    this.emotionActivatedAt = now;
+    this.emotionExpiresAt = now + (isFinal ? 2400 : 1400);
+  }
+
+  private installSpeechHook(): void {
+    const internalModel = this.model?.internalModel;
+    if (
+      this.speechHookInstalled
+      || !internalModel
+      || typeof internalModel.on !== 'function'
+    ) {
+      return;
+    }
+
+    internalModel.on('beforeModelUpdate', this.applySpeechParametersOnModelUpdate);
+    this.speechHookInstalled = true;
   }
 
   private getLipSyncParameterIds(): string[] {

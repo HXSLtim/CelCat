@@ -139,4 +139,77 @@ test('VolcengineRealtimeProviderClient concatenates assistant text deltas instea
     emittedEvents.some((event) => event.type === 'assistant-message' && event.text === '你好！'),
     true,
   );
+  assert.equal(
+    emittedEvents.some((event) => event.type === 'assistant-message' && event.text === '你好' && event.isFinal === false),
+    true,
+  );
+  assert.equal(
+    emittedEvents.some((event) => event.type === 'assistant-message' && event.text === '你好！' && event.isFinal === true),
+    true,
+  );
+});
+
+test('VolcengineRealtimeProviderClient merges punctuation-only tails into the previous final assistant text', () => {
+  const emittedEvents = [];
+  const client = new VolcengineRealtimeProviderClient({
+    enabled: true,
+    address: 'wss://openspeech.bytedance.com',
+    uri: '/api/v3/realtime/dialogue',
+    appId: 'app-id',
+    appKey: 'app-key',
+    accessToken: 'access-token',
+    resourceId: 'volc.speech.dialog',
+    uid: 'celcat-test',
+    botName: '豆包',
+    headersJson: '',
+    appendEventName: 'input_audio_buffer.append',
+    commitEventName: 'input_audio_buffer.commit',
+    systemRole: 'test',
+    speakingStyle: 'test',
+    speaker: 'speaker',
+    ttsFormat: 'pcm_s16le',
+    ttsSampleRate: 24000,
+  });
+
+  client.setEventSink((event) => {
+    emittedEvents.push(event);
+  });
+
+  client.bufferAssistantText('听起来你好像不太高兴，可以跟我说说发生什么了吗', true);
+  client.bufferAssistantText('？', true);
+
+  assert.equal(
+    emittedEvents.some((event) => event.type === 'assistant-message' && event.text === '听起来你好像不太高兴，可以跟我说说发生什么了吗？' && event.isFinal === true),
+    true,
+  );
+  assert.equal(
+    emittedEvents.some((event) => event.type === 'assistant-message' && event.text === '？'),
+    false,
+  );
+});
+
+test('VolcengineRealtimeProviderClient suppresses realtime assistant text before the microphone stream is ready', () => {
+  const client = new VolcengineRealtimeProviderClient({
+    enabled: true,
+    address: 'wss://openspeech.bytedance.com',
+    uri: '/api/v3/realtime/dialogue',
+    appId: 'app-id',
+    appKey: 'app-key',
+    accessToken: 'access-token',
+    resourceId: 'volc.speech.dialog',
+    uid: 'celcat-test',
+    botName: '豆包',
+    headersJson: '',
+    appendEventName: 'input_audio_buffer.append',
+    commitEventName: 'input_audio_buffer.commit',
+    systemRole: 'test',
+    speakingStyle: 'test',
+    speaker: 'speaker',
+    ttsFormat: 'pcm_s16le',
+    ttsSampleRate: 24000,
+  });
+
+  assert.equal(client.shouldEmitRealtimeAssistantText(550), false);
+  client.inputAudioReady = true;
+  assert.equal(client.shouldEmitRealtimeAssistantText(550), true);
 });

@@ -1,5 +1,7 @@
 node_modules/
 dist/
+release/
+agentWorkspace/
 *.log
 .env
 .env.local

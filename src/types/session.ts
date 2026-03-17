@@ -27,6 +27,7 @@ export type SessionEvent =
   | {
       type: 'assistant-message';
       text: string;
+      isFinal?: boolean;
       relatedTaskId?: string | null;
     }
   | {
