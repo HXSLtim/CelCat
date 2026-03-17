@@ -9,6 +9,7 @@ type SessionManagerDependencies = {
   companionProvider: CompanionProvider;
   emitEvent(event: SessionEvent): void;
   estimateSpeechDelayMs?(text: string): number;
+  realtimeRoutingDecisionDeadlineMs?: number;
 };
 
 type BufferedProviderEvent =
@@ -44,6 +45,9 @@ const DEFAULT_SNAPSHOT: SessionSnapshot = {
   error: '',
 };
 
+const DEFAULT_REALTIME_ROUTING_DECISION_DEADLINE_MS = 1600;
+const REALTIME_ROUTING_BUFFER_MAX_MS = 4000;
+
 export class SessionManager {
   private snapshot: SessionSnapshot = DEFAULT_SNAPSHOT;
   private totalForwardedAudioFrames = 0;
@@ -63,6 +67,15 @@ export class SessionManager {
     transcript: string;
     startedAt: number;
     bufferedEvents: BufferedProviderEvent[];
+    bufferLogEmitted: boolean;
+    stats: {
+      assistantMessageCount: number;
+      assistantAudioCount: number;
+      toolCallCount: number;
+      errorCount: number;
+      lastAssistantPreview: string | null;
+    };
+    deadlineTimer: ReturnType<typeof setTimeout>;
   } | null = null;
   private pendingProviderTurnId = 0;
 
@@ -219,7 +232,7 @@ export class SessionManager {
     }
     if (event.type === 'transcript' && event.text) {
       if (this.pendingProviderTurn) {
-        this.flushBufferedProviderTurn('superseded-by-new-transcript');
+        this.discardBufferedProviderTurn('superseded-by-new-transcript');
       }
 
       this.setSnapshot({
@@ -235,6 +248,20 @@ export class SessionManager {
         transcript: event.text,
         startedAt: Date.now(),
         bufferedEvents: [],
+        bufferLogEmitted: false,
+        stats: {
+          assistantMessageCount: 0,
+          assistantAudioCount: 0,
+          toolCallCount: 0,
+          errorCount: 0,
+          lastAssistantPreview: null,
+        },
+        deadlineTimer: setTimeout(() => {
+          if (this.pendingProviderTurn?.id !== turnId) {
+            return;
+          }
+          this.flushBufferedProviderTurn('routing-deadline-exceeded');
+        }, this.getRealtimeRoutingDecisionDeadlineMs()),
       };
       void this.handleRealtimeProviderTranscript(event.text, turnId);
       return;
@@ -283,6 +310,14 @@ export class SessionManager {
     }
 
     if (event.type === 'tool-call') {
+      if (this.pendingProviderTurn) {
+        logDebug('session', 'Provider emitted tool call while routing was still pending; prioritizing tool execution', {
+          transcript: truncateDebugText(this.pendingProviderTurn.transcript, 200),
+          toolName: event.toolName,
+        });
+        this.discardBufferedProviderTurn('provider-tool-call');
+      }
+
       const bufferedEvent: BufferedProviderEvent = {
         type: 'tool-call',
         toolName: event.toolName,
@@ -365,6 +400,17 @@ export class SessionManager {
     await this.flushPendingCompanionIdentitySync();
     const conversation = await this.dependencies.orchestrator.handleRealtimeProviderTranscript?.(transcript);
     if (!this.pendingProviderTurn || this.pendingProviderTurn.id !== turnId) {
+      if (
+        conversation
+        && this.pendingProviderTurnId === turnId
+      ) {
+        logDebug('session', 'Applying late local routing decision after provider turn was already released', {
+          transcript: truncateDebugText(transcript, 200),
+          hasRelatedTask: Boolean(conversation.relatedTask),
+          eventCount: conversation.events.length,
+        });
+        this.applyRealtimeConversationTakeover(transcript, conversation);
+      }
       return;
     }
 
@@ -373,6 +419,13 @@ export class SessionManager {
       return;
     }
 
+    this.applyRealtimeConversationTakeover(transcript, conversation);
+  }
+
+  private applyRealtimeConversationTakeover(
+    transcript: string,
+    conversation: NonNullable<Awaited<ReturnType<ConversationOrchestrator['handleRealtimeProviderTranscript']>>>,
+  ): void {
     logDebug('session', 'Realtime provider transcript was intercepted by local orchestrator', {
       transcript: truncateDebugText(transcript, 200),
       hasRelatedTask: Boolean(conversation.relatedTask),
@@ -384,7 +437,10 @@ export class SessionManager {
       startedAt: Date.now(),
       reason: conversation.relatedTask ? 'background-task' : 'local-control-intent',
     };
-    this.pendingProviderTurn = null;
+    if (this.pendingProviderTurn) {
+      clearTimeout(this.pendingProviderTurn.deadlineTimer);
+      this.pendingProviderTurn = null;
+    }
 
     if (conversation.relatedTask) {
       this.setSnapshot({
@@ -636,6 +692,14 @@ export class SessionManager {
     return Math.max(900, Math.min(3600, 520 + normalizedLength * 170));
   }
 
+  private getRealtimeRoutingDecisionDeadlineMs(): number {
+    return Math.max(
+      0,
+      this.dependencies.realtimeRoutingDecisionDeadlineMs
+        ?? DEFAULT_REALTIME_ROUTING_DECISION_DEADLINE_MS,
+    );
+  }
+
   private isProviderReplySuppressed(): boolean {
     if (!this.suppressedProviderReply) {
       return false;
@@ -668,18 +732,19 @@ export class SessionManager {
       return false;
     }
 
-    if (Date.now() - this.pendingProviderTurn.startedAt > 4000) {
+    if (Date.now() - this.pendingProviderTurn.startedAt > REALTIME_ROUTING_BUFFER_MAX_MS) {
       this.flushBufferedProviderTurn('routing-timeout');
       return false;
     }
 
-    logDebug('session', 'Buffering realtime provider output while waiting for local routing decision', {
-      transcript: truncateDebugText(this.pendingProviderTurn.transcript, 200),
-      eventType: event.type,
-      text: event.text ? truncateDebugText(event.text, 160) : undefined,
-      message: event.message,
-      toolName: event.toolName,
-    });
+    this.recordBufferedProviderEvent(event);
+    if (!this.pendingProviderTurn.bufferLogEmitted) {
+      this.pendingProviderTurn.bufferLogEmitted = true;
+      logDebug('session', 'Started buffering realtime provider output while waiting for local routing decision', {
+        transcript: truncateDebugText(this.pendingProviderTurn.transcript, 200),
+        deadlineMs: this.getRealtimeRoutingDecisionDeadlineMs(),
+      });
+    }
     return true;
   }
 
@@ -693,12 +758,100 @@ export class SessionManager {
       transcript: truncateDebugText(pendingTurn.transcript, 200),
       reason,
       bufferedEventCount: pendingTurn.bufferedEvents.length,
+      assistantMessageCount: pendingTurn.stats.assistantMessageCount,
+      assistantAudioCount: pendingTurn.stats.assistantAudioCount,
+      toolCallCount: pendingTurn.stats.toolCallCount,
+      errorCount: pendingTurn.stats.errorCount,
+      lastAssistantPreview: pendingTurn.stats.lastAssistantPreview,
     });
 
     this.pendingProviderTurn = null;
-    for (const bufferedEvent of pendingTurn.bufferedEvents) {
+    clearTimeout(pendingTurn.deadlineTimer);
+    const filteredEvents = this.filterBufferedProviderEventsBeforeFlush(pendingTurn.bufferedEvents, reason);
+    for (const bufferedEvent of filteredEvents) {
       this.handleProviderEvent(bufferedEvent);
     }
+  }
+
+  private discardBufferedProviderTurn(reason: string): void {
+    const pendingTurn = this.pendingProviderTurn;
+    if (!pendingTurn) {
+      return;
+    }
+
+    logDebug('session', 'Discarding buffered provider turn before local routing completed', {
+      transcript: truncateDebugText(pendingTurn.transcript, 200),
+      reason,
+      bufferedEventCount: pendingTurn.bufferedEvents.length,
+      assistantMessageCount: pendingTurn.stats.assistantMessageCount,
+      assistantAudioCount: pendingTurn.stats.assistantAudioCount,
+      toolCallCount: pendingTurn.stats.toolCallCount,
+      errorCount: pendingTurn.stats.errorCount,
+    });
+
+    this.pendingProviderTurn = null;
+    clearTimeout(pendingTurn.deadlineTimer);
+  }
+
+  private filterBufferedProviderEventsBeforeFlush(
+    bufferedEvents: BufferedProviderEvent[],
+    reason: string,
+  ): BufferedProviderEvent[] {
+    const hasCompatibilityDirectiveLeak = bufferedEvents.some((event) =>
+      event.type === 'assistant-message' && looksLikeCompatibilityDirectiveLeak(event.text),
+    );
+    if (!hasCompatibilityDirectiveLeak) {
+      return bufferedEvents;
+    }
+
+    logDebug('session', 'Dropping malformed compatibility directive fragments before provider turn flush', {
+      reason,
+      droppedEventCount: bufferedEvents.filter((event) =>
+        event.type === 'assistant-message'
+        || event.type === 'assistant-audio',
+      ).length,
+    });
+
+    return bufferedEvents.filter((event) => {
+      if (event.type === 'assistant-message') {
+        return !looksLikeCompatibilityDirectiveLeak(event.text);
+      }
+
+      if (event.type === 'assistant-audio') {
+        return false;
+      }
+
+      return true;
+    });
+  }
+
+  private recordBufferedProviderEvent(event: {
+    type: 'assistant-message' | 'assistant-audio' | 'tool-call' | 'error';
+    text?: string;
+  }): void {
+    if (!this.pendingProviderTurn) {
+      return;
+    }
+
+    if (event.type === 'assistant-message') {
+      this.pendingProviderTurn.stats.assistantMessageCount += 1;
+      this.pendingProviderTurn.stats.lastAssistantPreview = event.text
+        ? truncateDebugText(event.text, 80)
+        : this.pendingProviderTurn.stats.lastAssistantPreview;
+      return;
+    }
+
+    if (event.type === 'assistant-audio') {
+      this.pendingProviderTurn.stats.assistantAudioCount += 1;
+      return;
+    }
+
+    if (event.type === 'tool-call') {
+      this.pendingProviderTurn.stats.toolCallCount += 1;
+      return;
+    }
+
+    this.pendingProviderTurn.stats.errorCount += 1;
   }
 
   private async handleProviderToolCall(event: {
@@ -758,4 +911,21 @@ export class SessionManager {
       error: '',
     });
   }
+}
+
+function looksLikeCompatibilityDirectiveLeak(text: string): boolean {
+  const normalizedText = text.trim();
+  if (!normalizedText) {
+    return false;
+  }
+
+  const lowered = normalizedText.toLowerCase();
+  if (!(lowered.includes('celcat') && lowered.includes('name='))) {
+    return false;
+  }
+
+  return lowered.includes('openbrowser')
+    || lowered.includes('renamecompanion')
+    || lowered.includes('startagenttask')
+    || lowered.includes('tool');
 }

@@ -14,7 +14,23 @@ test('ConversationOrchestrator creates background tasks for heavy requests', asy
   const taskStore = new InMemoryTaskStore();
   const taskRunner = new TaskRunner(taskStore);
   const settingsStore = new UserSettingsStore(tempDir);
-  const orchestrator = new ConversationOrchestrator(taskStore, taskRunner, settingsStore);
+  const orchestrator = new ConversationOrchestrator(
+    taskStore,
+    taskRunner,
+    settingsStore,
+    undefined,
+    {
+      async routeTranscript() {
+        return {
+          mode: 'agent',
+          kind: 'claude',
+          transcript: '帮我分析一下这个需求并给出方案',
+          confidence: 0.99,
+          reason: '需要多步骤分析和方案整理。',
+        };
+      },
+    },
+  );
 
   const result = await orchestrator.handleTranscript('帮我分析一下这个需求并给出方案');
 
@@ -28,7 +44,23 @@ test('ConversationOrchestrator routes browser-opening requests to the background
   const taskStore = new InMemoryTaskStore();
   const taskRunner = new TaskRunner(taskStore);
   const settingsStore = new UserSettingsStore(tempDir);
-  const orchestrator = new ConversationOrchestrator(taskStore, taskRunner, settingsStore);
+  const orchestrator = new ConversationOrchestrator(
+    taskStore,
+    taskRunner,
+    settingsStore,
+    undefined,
+    {
+      async routeTranscript() {
+        return {
+          mode: 'agent',
+          kind: 'tool',
+          transcript: '帮我打开一下浏览器',
+          confidence: 0.99,
+          reason: '打开浏览器属于需要实际执行的工具任务。',
+        };
+      },
+    },
+  );
 
   const result = await orchestrator.handleTranscript('帮我打开一下浏览器');
 
@@ -109,13 +141,12 @@ test('ConversationOrchestrator injects identity and memory context for companion
   assert.ok(result.companionRequest);
   assert.match(result.companionRequest.prompt, /你是 小影/);
   assert.match(result.companionRequest.prompt, /你现在对用户自称“小影”/);
-  assert.match(result.companionRequest.prompt, /\[\[CELCAT_AGENT kind=codex\]\]/);
   assert.match(result.companionRequest.prompt, /用户长期偏好：/);
   assert.match(result.companionRequest.prompt, /最近相关上下文：/);
   assert.match(result.companionRequest.prompt, /用户刚刚说：你还记得你是谁吗/);
 });
 
-test('ConversationOrchestrator persists spoken rename requests into companion identity', async () => {
+test('ConversationOrchestrator does not hard-intercept spoken rename requests locally', async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'celcat-settings-'));
   const taskStore = new InMemoryTaskStore();
   const taskRunner = new TaskRunner(taskStore);
@@ -147,10 +178,104 @@ test('ConversationOrchestrator persists spoken rename requests into companion id
 
   const result = await orchestrator.handleTranscript('以后我叫你小影');
 
+  assert.equal(updateCalls.length, 0);
+  assert.ok(result.companionRequest);
+  assert.equal(result.events.length, 0);
+  assert.match(result.companionRequest.prompt, /用户刚刚说：以后我叫你小影/);
+});
+
+test('ConversationOrchestrator applies model-routed rename requests through companion identity update', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'celcat-settings-'));
+  const taskStore = new InMemoryTaskStore();
+  const taskRunner = new TaskRunner(taskStore);
+  const settingsStore = new UserSettingsStore(tempDir);
+  const updateCalls = [];
+  let currentIdentity = {
+    displayName: '小影',
+    identityNotes: [],
+    updatedAt: new Date().toISOString(),
+  };
+  const memoryStore = {
+    getPlanningContext: () => ({
+      stablePreferences: [],
+      recentMemories: [],
+      relevantMemories: [],
+      longTermMemories: [],
+      capabilitySignals: [],
+    }),
+    getCompanionIdentity: () => currentIdentity,
+    updateCompanionIdentity: (update) => {
+      updateCalls.push(update);
+      currentIdentity = {
+        displayName: update.displayName || currentIdentity.displayName,
+        identityNotes: update.identityNotes || [],
+        updatedAt: new Date().toISOString(),
+      };
+      return currentIdentity;
+    },
+  };
+  const orchestrator = new ConversationOrchestrator(
+    taskStore,
+    taskRunner,
+    settingsStore,
+    memoryStore,
+    {
+      async routeTranscript() {
+        return {
+          mode: 'identity',
+          action: 'renameCompanion',
+          displayName: '豆包',
+          confidence: 0.98,
+          reason: '用户在明确要求给 companion 改名。',
+        };
+      },
+    },
+  );
+
+  const result = await orchestrator.handleTranscript('我现在给你改名，你叫豆包。');
+
+  assert.equal(currentIdentity.displayName, '豆包');
   assert.equal(updateCalls.length, 1);
-  assert.equal(updateCalls[0].displayName, '小影');
   assert.equal(result.companionRequest, null);
-  assert.match(result.events[0].text, /以后就叫小影/);
+  assert.match(result.events[0].text, /以后就叫豆包/);
+});
+
+test('ConversationOrchestrator does not misread name questions as rename commands', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'celcat-settings-'));
+  const taskStore = new InMemoryTaskStore();
+  const taskRunner = new TaskRunner(taskStore);
+  const settingsStore = new UserSettingsStore(tempDir);
+  const updateCalls = [];
+  const memoryStore = {
+    getPlanningContext: () => ({
+      stablePreferences: [],
+      recentMemories: [],
+      relevantMemories: [],
+      longTermMemories: [],
+      capabilitySignals: [],
+    }),
+    getCompanionIdentity: () => ({
+      displayName: '什么',
+      identityNotes: [],
+      updatedAt: new Date().toISOString(),
+    }),
+    updateCompanionIdentity: (update) => {
+      updateCalls.push(update);
+      return {
+        displayName: update.displayName || '什么',
+        identityNotes: update.identityNotes || [],
+        updatedAt: new Date().toISOString(),
+      };
+    },
+  };
+  const orchestrator = new ConversationOrchestrator(taskStore, taskRunner, settingsStore, memoryStore);
+
+  const result = await orchestrator.handleTranscript('我是说你叫什么名字？');
+
+  assert.equal(updateCalls.length, 0);
+  assert.ok(result.companionRequest);
+  assert.equal(result.events.length, 0);
+  assert.match(result.companionRequest.prompt, /用户刚刚说：我是说你叫什么名字？/);
 });
 
 test('ConversationOrchestrator converts companion handoff directives into background tasks', async () => {
@@ -171,7 +296,7 @@ test('ConversationOrchestrator converts companion handoff directives into backgr
   assert.equal(taskStore.list().length, 1);
 });
 
-test('ConversationOrchestrator overrides browser refusal replies into forced agent tasks', async () => {
+test('ConversationOrchestrator does not override a browser refusal reply via regex fallback', async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'celcat-settings-'));
   const taskStore = new InMemoryTaskStore();
   const taskRunner = new TaskRunner(taskStore);
@@ -183,10 +308,8 @@ test('ConversationOrchestrator overrides browser refusal replies into forced age
     '不好意思啊，我没办法直接打开浏览器呢。',
   );
 
-  assert.ok(result);
-  assert.equal(result.relatedTask?.kind, 'tool');
-  assert.match(result.events[0].text, /后台 agent 处理|后台处理/);
-  assert.equal(taskStore.list().length, 1);
+  assert.equal(result, null);
+  assert.equal(taskStore.list().length, 0);
 });
 
 test('ConversationOrchestrator exposes a system method for creating background tasks', () => {

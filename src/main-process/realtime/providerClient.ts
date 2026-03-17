@@ -4,15 +4,16 @@ import { logDebug, truncateDebugText } from '../../shared/debugLogger';
 import {
   buildChatTextQueryFrame,
   buildFinishConnectionFrame,
-  buildFinishSessionFrame,
+  getRealtimeSessionLifecycle,
+  type RealtimeSessionLifecycleMode,
   buildSayHelloFrame,
   buildStartConnectionFrame,
-  buildStartSessionFrame,
   buildTaskRequestFrame,
   parseRealtimeResponse,
 } from './protocol';
 import type { CompanionIdentityProfile } from '../agent/agentMemoryStore';
 import type { TaskKind } from '../../types/tasks';
+import type { VoiceChatStartConfig } from './voiceChatSessionBlueprint';
 
 type PendingReply = {
   resolve: (value: string | null) => void;
@@ -45,6 +46,14 @@ export type ProviderEvent =
   | { type: 'assistant-audio'; pcmBase64: string; sampleRate: number; channels: number; format: 'pcm_s16le' }
   | { type: 'tool-call'; toolName: string; arguments: Record<string, unknown>; rawText?: string }
   | { type: 'error'; message: string };
+
+type StartSessionPayloadOptions = {
+  lifecycleMode: RealtimeSessionLifecycleMode;
+  config: VolcengineRealtimeConfig;
+  botNameOverride?: string;
+  systemRoleOverride?: string | null;
+  voiceChatStartConfig?: VoiceChatStartConfig | null;
+};
 
 export type VolcengineRealtimeConfig = {
   enabled: boolean;
@@ -81,6 +90,9 @@ export type CompanionProvider = {
   setEventSink(listener: ((event: ProviderEvent) => void) | null): void;
   syncCompanionIdentity(identity: Pick<CompanionIdentityProfile, 'displayName'>): Promise<void>;
   executeToolCall?(toolCall: CompanionToolCall): Promise<CompanionToolExecutionResult | null>;
+  setSessionSystemRole?(systemRole: string | null): void;
+  setVoiceChatStartConfig?(config: VoiceChatStartConfig | null): void;
+  setTransportLifecycleMode?(mode: RealtimeSessionLifecycleMode): void;
 };
 
 export function readVolcengineRealtimeConfig(env: NodeJS.ProcessEnv): VolcengineRealtimeConfig {
@@ -145,6 +157,9 @@ export class VolcengineRealtimeProviderClient implements CompanionProvider {
     reject: (error: Error) => void;
     timer: NodeJS.Timeout | null;
   }>>();
+  private sessionSystemRoleOverride: string | null = null;
+  private voiceChatStartConfigOverride: VoiceChatStartConfig | null = null;
+  private transportLifecycleMode: RealtimeSessionLifecycleMode = 'dialogue';
 
   constructor(
     private readonly config: VolcengineRealtimeConfig = readVolcengineRealtimeConfig(process.env),
@@ -162,6 +177,35 @@ export class VolcengineRealtimeProviderClient implements CompanionProvider {
 
   setEventSink(listener: ((event: ProviderEvent) => void) | null): void {
     this.eventSink = listener;
+  }
+
+  setSessionSystemRole(systemRole: string | null): void {
+    this.sessionSystemRoleOverride = systemRole?.trim() || null;
+    logDebug('provider', 'Updated realtime session system role override', {
+      hasOverride: Boolean(this.sessionSystemRoleOverride),
+      preview: this.sessionSystemRoleOverride
+        ? truncateDebugText(this.sessionSystemRoleOverride, 600)
+        : null,
+    });
+  }
+
+  setVoiceChatStartConfig(config: VoiceChatStartConfig | null): void {
+    this.voiceChatStartConfigOverride = config;
+    logDebug('provider', 'Updated voiceChat start config override', {
+      hasConfig: Boolean(config),
+      systemMessageCount: config?.systemMessages.length ?? 0,
+      functionCount: config?.functions.length ?? 0,
+      mcpCount: config?.mcps.length ?? 0,
+      activeTaskSummary: config?.activeTaskSummary ?? null,
+      protocolMode: 'voiceChatShim',
+    });
+  }
+
+  setTransportLifecycleMode(mode: RealtimeSessionLifecycleMode): void {
+    this.transportLifecycleMode = mode;
+    logDebug('provider', 'Updated realtime transport lifecycle mode', {
+      mode,
+    });
   }
 
   async syncCompanionIdentity(identity: Pick<CompanionIdentityProfile, 'displayName'>): Promise<void> {
@@ -239,7 +283,8 @@ export class VolcengineRealtimeProviderClient implements CompanionProvider {
     logDebug('provider', 'Closing realtime websocket');
     if (socket.readyState === WebSocket.OPEN) {
       try {
-        socket.send(buildFinishSessionFrame(this.sessionId));
+        const lifecycle = getRealtimeSessionLifecycle(this.transportLifecycleMode);
+        socket.send(lifecycle.buildFinishFrame(this.sessionId));
         socket.send(buildFinishConnectionFrame());
       } catch {
         // Ignore teardown errors while closing.
@@ -481,23 +526,38 @@ export class VolcengineRealtimeProviderClient implements CompanionProvider {
       return;
     }
 
+    const lifecycle = getRealtimeSessionLifecycle(this.transportLifecycleMode);
+
     logDebug('provider', 'Sending StartConnection frame');
     this.sendMessage(buildStartConnectionFrame(), 'StartConnection');
     await this.waitForProviderEvent(50, 4000).catch(() => {
       logDebug('provider', 'StartConnection acknowledgement timed out; continuing');
     });
 
-    logDebug('provider', 'Sending StartSession frame', {
+    logDebug('provider', `Sending ${lifecycle.startEventLabel} frame`, {
       botName: this.runtimeBotName,
       uid: this.config.uid,
       sessionId: this.sessionId,
+      hasSystemRoleOverride: Boolean(this.sessionSystemRoleOverride),
+      hasVoiceChatStartConfigOverride: Boolean(this.voiceChatStartConfigOverride),
+      transportLifecycleMode: lifecycle.mode,
+      protocolFamily: lifecycle.protocolFamily,
     });
     this.sendMessage(
-      buildStartSessionFrame(this.sessionId, createStartSessionPayload(this.config, this.runtimeBotName)),
-      'StartSession',
+      lifecycle.buildStartFrame(
+        this.sessionId,
+        buildLifecycleStartSessionPayload({
+          lifecycleMode: lifecycle.mode,
+          config: this.config,
+          botNameOverride: this.runtimeBotName,
+          systemRoleOverride: this.sessionSystemRoleOverride,
+          voiceChatStartConfig: this.voiceChatStartConfigOverride,
+        }),
+      ),
+      lifecycle.startEventLabel,
     );
-    await this.waitForProviderEvent(150, 4000).catch(() => {
-      logDebug('provider', 'StartSession acknowledgement timed out; continuing');
+    await this.waitForProviderEvent(lifecycle.startAckEvent, 4000).catch(() => {
+      logDebug('provider', `${lifecycle.startEventLabel} acknowledgement timed out; continuing`);
     });
     this.sessionStarted = true;
 
@@ -724,11 +784,67 @@ function parseHeadersJson(raw: string): Record<string, string> {
   }
 }
 
-function createStartSessionPayload(
+export function buildLifecycleStartSessionPayload(
+  input: StartSessionPayloadOptions,
+): Record<string, unknown> {
+  switch (input.lifecycleMode) {
+    case 'voiceChatNative':
+      return buildVoiceChatNativeStartSessionPayload(input);
+    case 'voiceChatShim':
+      return buildVoiceChatShimStartSessionPayload(input);
+    case 'dialogue':
+    default:
+      return buildDialogueStartSessionPayload(
+        input.config,
+        input.botNameOverride,
+        input.systemRoleOverride,
+      );
+  }
+}
+
+function buildVoiceChatNativeStartSessionPayload(
+  input: StartSessionPayloadOptions,
+): Record<string, unknown> {
+  const botName = input.botNameOverride?.trim() || input.config.botName;
+  return {
+    transport: {
+      mode: 'voiceChatNative',
+      migrationStatus: 'pending-native-startvoicechat-transport',
+    },
+    session: {
+      botName,
+      uid: input.config.uid,
+      startEvent: 'StartVoiceChat',
+    },
+    llm: {
+      systemMessages: input.voiceChatStartConfig?.systemMessages.slice() ?? [],
+      tools: input.voiceChatStartConfig?.functions.map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        inputSchema: tool.inputSchema,
+      })) ?? [],
+      mcps: input.voiceChatStartConfig?.mcps.map((mcp) => ({
+        id: mcp.id,
+        label: mcp.label,
+        description: mcp.description,
+      })) ?? [],
+    },
+    memory: input.voiceChatStartConfig?.memory ?? {
+      stablePreferences: [],
+      relevantMemories: [],
+      longTermMemories: [],
+    },
+    activeTaskSummary: input.voiceChatStartConfig?.activeTaskSummary ?? null,
+  };
+}
+
+function buildDialogueStartSessionPayload(
   config: VolcengineRealtimeConfig,
   botNameOverride?: string,
+  systemRoleOverride?: string | null,
 ): Record<string, unknown> {
   const botName = botNameOverride?.trim() || config.botName;
+  const systemRole = systemRoleOverride?.trim() || config.systemRole;
   return {
     asr: {
       extra: {
@@ -745,7 +861,7 @@ function createStartSessionPayload(
     },
     dialog: {
       bot_name: botName,
-      system_role: `${config.systemRole} 你的当前名字是“${botName}”，和用户对话时请稳定使用这个名字进行自称。`,
+      system_role: `${systemRole} 你的当前名字是“${botName}”，和用户对话时请稳定使用这个名字进行自称。`,
       speaking_style: config.speakingStyle,
       location: {
         city: '北京',
@@ -755,6 +871,113 @@ function createStartSessionPayload(
         recv_timeout: 10,
         input_mod: 'audio',
       },
+    },
+  };
+}
+
+function buildVoiceChatShimStartSessionPayload(
+  input: StartSessionPayloadOptions,
+): Record<string, unknown> {
+  const botName = input.botNameOverride?.trim() || input.config.botName;
+  const systemRole = buildVoiceChatShimSystemRole({
+    config: input.config,
+    botName,
+    systemRoleOverride: input.systemRoleOverride,
+    voiceChatStartConfig: input.voiceChatStartConfig,
+  });
+
+  const payload = buildDialogueStartSessionPayload(
+    input.config,
+    botName,
+    systemRole,
+  );
+
+  const dialog = isRecord(payload.dialog) ? payload.dialog : {};
+  const extra = isRecord(dialog.extra) ? dialog.extra : {};
+
+  return {
+    ...payload,
+    dialog: {
+      ...dialog,
+      extra: {
+        ...extra,
+        compatibility_mode: 'voiceChatShim',
+        celcat_voice_chat: buildVoiceChatShimMetadata(input.voiceChatStartConfig),
+      },
+    },
+  };
+}
+
+export function buildVoiceChatShimSystemRole(input: {
+  config: VolcengineRealtimeConfig;
+  botName: string;
+  systemRoleOverride?: string | null;
+  voiceChatStartConfig?: VoiceChatStartConfig | null;
+}): string {
+  const baseRole = input.systemRoleOverride?.trim() || input.config.systemRole;
+  const startConfig = input.voiceChatStartConfig;
+  const sections = [
+    baseRole,
+    '你当前运行在 CelCat 的 StartVoiceChat 兼容模式中。',
+    '如果需要调用本地工具，请只输出一行工具调用，格式：[[CELCAT_TOOL name=<toolName>]]{"field":"value"}。',
+    '如果用户明确要求你改名、换名、以后改叫某个名字，优先调用 renameCompanion；如果只是问你叫什么名字或你是谁，直接正常回答。',
+    '如果用户要求打开浏览器、访问网页、搜索资料或执行多步骤任务，优先调用 openBrowser 或 startAgentTask，不要口头拒绝自己做不到。',
+    ...(startConfig?.systemMessages.slice(0, 6) ?? []),
+    startConfig?.functions.length
+      ? `可用函数：${startConfig.functions
+        .slice(0, 8)
+        .map((tool) => `${tool.name}: ${tool.description}`)
+        .join('；')}`
+      : '',
+    startConfig?.mcps.length
+      ? `可用 MCP：${startConfig.mcps
+        .slice(0, 6)
+        .map((mcp) => `${mcp.label}: ${mcp.description}`)
+        .join('；')}`
+      : '',
+    buildVoiceChatMemorySummary(startConfig),
+    startConfig?.activeTaskSummary
+      ? `当前后台任务：${startConfig.activeTaskSummary}`
+      : '',
+    `你的当前名字是“${input.botName}”，和用户对话时请稳定使用这个名字进行自称。`,
+  ].filter(Boolean);
+
+  return sections.join('\n').slice(0, 3200);
+}
+
+function buildVoiceChatMemorySummary(startConfig?: VoiceChatStartConfig | null): string {
+  if (!startConfig) {
+    return '';
+  }
+
+  const sections = [
+    startConfig.memory.stablePreferences.length
+      ? `用户稳定偏好：${startConfig.memory.stablePreferences.slice(0, 4).join('；')}`
+      : '',
+    startConfig.memory.relevantMemories.length
+      ? `相关记忆：${startConfig.memory.relevantMemories.slice(0, 4).join('；')}`
+      : '',
+    startConfig.memory.longTermMemories.length
+      ? `长期记忆：${startConfig.memory.longTermMemories.slice(0, 4).join('；')}`
+      : '',
+  ].filter(Boolean);
+
+  return sections.join('\n');
+}
+
+function buildVoiceChatShimMetadata(
+  startConfig?: VoiceChatStartConfig | null,
+): Record<string, unknown> {
+  return {
+    has_start_config: Boolean(startConfig),
+    system_message_count: startConfig?.systemMessages.length ?? 0,
+    function_names: startConfig?.functions.map((tool) => tool.name) ?? [],
+    mcp_ids: startConfig?.mcps.map((mcp) => mcp.id) ?? [],
+    active_task_summary: startConfig?.activeTaskSummary ?? null,
+    memory_counts: {
+      stable_preferences: startConfig?.memory.stablePreferences.length ?? 0,
+      relevant_memories: startConfig?.memory.relevantMemories.length ?? 0,
+      long_term_memories: startConfig?.memory.longTermMemories.length ?? 0,
     },
   };
 }

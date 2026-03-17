@@ -7,7 +7,11 @@ import {
   type ProviderEvent,
 } from './providerClient';
 import { getVoiceChatToolPromptSummary } from './voiceChatToolRegistry';
-import { parseVoiceChatToolCall, VoiceChatToolExecutor } from './voiceChatToolExecutor';
+import {
+  looksLikeVoiceChatToolDirectiveFragment,
+  parseVoiceChatToolCall,
+  VoiceChatToolExecutor,
+} from './voiceChatToolExecutor';
 import {
   buildVoiceChatCompatibilityContextBlock,
   type VoiceChatSessionBlueprint,
@@ -143,20 +147,28 @@ export class VolcengineVoiceChatProviderClient implements CompanionProvider {
     }
 
     if (event.type === 'assistant-message' && this.toolExecutor) {
-      if (event.text.trim().startsWith('[[CELCAT_TOOL')) {
+      const normalizedText = event.text.trim();
+      if (looksLikeVoiceChatToolDirectiveFragment(normalizedText)) {
         this.suppressCompatibilityToolMessage = true;
       }
 
       if (this.suppressCompatibilityToolMessage) {
         if (event.isFinal !== false) {
           this.suppressCompatibilityToolMessage = false;
-          const toolCall = parseVoiceChatToolCall(event.text);
+          const toolCall = parseVoiceChatToolCall(normalizedText);
           if (toolCall) {
             this.eventSink({
               type: 'tool-call',
               toolName: toolCall.name,
               arguments: toolCall.arguments,
-              rawText: event.text,
+              rawText: normalizedText,
+            });
+            return;
+          }
+
+          if (looksLikeVoiceChatToolDirectiveFragment(normalizedText)) {
+            logDebug('provider', 'Dropped malformed compatibility tool fragment from provider stream', {
+              text: normalizedText.slice(0, 200),
             });
             return;
           }
@@ -180,6 +192,11 @@ function buildVoiceChatCompatibilityPrompt(
     '工具调用格式：[[CELCAT_TOOL name=<toolName>]]{"field":"value"}',
     '可用工具：startAgentTask={kind,transcript}；renameCompanion={displayName}；openBrowser={url?,query?}。',
     '当用户要求你执行任务、打开浏览器、访问网页、搜索资料、修改项目、处理文件、调用 skill 或 MCP、或者要求更改你的名字时，优先使用工具调用。',
+    '关于 renameCompanion：只有在用户明确要求你改名、换名、以后改叫某个名字时才调用。',
+    '如果用户只是问“你叫什么名字”“你现在叫什么”“你是谁”，这是普通聊天，直接回答当前名字，不要调用 renameCompanion。',
+    'renameCompanion 的 displayName 必须只填写新的名字本身，不能带“名字”“叫什么”“我说”这类多余词。',
+    '正例：“以后叫你小影” -> [[CELCAT_TOOL name=renameCompanion]]{"displayName":"小影"}',
+    '反例：“你叫什么名字” -> 直接回答当前名字，不调用工具。',
     '如果只是普通闲聊，正常直接回复即可。',
     '兼容说明：如果上游提示里已经要求你输出 [[CELCAT_AGENT ...]]，你也可以照做；但优先使用上面的工具调用格式。',
     blueprint ? '以下是本轮会话初始化蓝图摘要：' : '',

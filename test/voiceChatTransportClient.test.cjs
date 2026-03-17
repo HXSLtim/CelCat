@@ -29,14 +29,36 @@ test('readVolcengineVoiceChatTransportConfig prefers dedicated voiceChat env var
   assert.equal(config.appId, 'voicechat-app');
   assert.equal(config.accessToken, 'voicechat-key');
   assert.equal(config.resourceId, 'voicechat-resource');
+  assert.equal(config.transportMode, 'shim');
+  assert.equal(config.protocolFamily, 'dialogue-websocket');
+  assert.equal(config.lifecycleMode, 'voiceChatShim');
   assert.equal(config.startEventName, 'StartVoiceChat');
   assert.equal(config.transportLabel, 'voiceChat');
+});
+
+test('readVolcengineVoiceChatTransportConfig supports an explicit native transport mode', () => {
+  const config = readVolcengineVoiceChatTransportConfig({
+    VOLCENGINE_VOICECHAT_TRANSPORT_MODE: 'native',
+  });
+
+  assert.equal(config.transportMode, 'native');
+  assert.equal(config.protocolFamily, 'native-voicechat-openapi');
+  assert.equal(config.lifecycleMode, 'voiceChatNative');
 });
 
 test('VolcengineVoiceChatTransportClient forwards provider lifecycle to the wrapped base client', async () => {
   const calls = [];
   const transport = new VolcengineVoiceChatTransportClient(
     {
+      setTransportLifecycleMode(mode) {
+        calls.push(['setTransportLifecycleMode', mode]);
+      },
+      setVoiceChatStartConfig(config) {
+        calls.push(['setVoiceChatStartConfig', config?.functions.length ?? 0]);
+      },
+      setSessionSystemRole(systemRole) {
+        calls.push(['setSessionSystemRole', typeof systemRole === 'string' && systemRole.length > 0]);
+      },
       async connect() {
         calls.push('connect');
       },
@@ -85,8 +107,27 @@ test('VolcengineVoiceChatTransportClient forwards provider lifecycle to the wrap
       longTermMemories: [],
     },
     capabilities: {
-      tools: [],
+      tools: [{
+        id: 'openBrowser',
+        description: '打开浏览器',
+        inputSchema: { type: 'object' },
+      }],
       mcpServers: [],
+    },
+    nativeSessionConfig: {
+      systemMessages: ['test'],
+      functions: [{
+        name: 'openBrowser',
+        description: '打开浏览器',
+        inputSchema: { type: 'object' },
+      }],
+      mcps: [],
+      memory: {
+        stablePreferences: [],
+        relevantMemories: [],
+        longTermMemories: [],
+      },
+      activeTaskSummary: null,
     },
     activeTask: null,
   });
@@ -95,8 +136,79 @@ test('VolcengineVoiceChatTransportClient forwards provider lifecycle to the wrap
   assert.equal(await transport.generateReply('你好'), '你好');
 
   assert.deepEqual(calls, [
+    ['setTransportLifecycleMode', 'voiceChatShim'],
+    ['setVoiceChatStartConfig', 1],
+    ['setSessionSystemRole', true],
     'connect',
     'startSession',
     ['generateReply', '你好'],
+  ]);
+});
+
+test('VolcengineVoiceChatTransportClient forwards a native transport lifecycle when configured', () => {
+  const calls = [];
+  const transport = new VolcengineVoiceChatTransportClient(
+    {
+      setTransportLifecycleMode(mode) {
+        calls.push(['setTransportLifecycleMode', mode]);
+      },
+      setVoiceChatStartConfig() {},
+      setSessionSystemRole() {},
+      async connect() {},
+      async disconnect() {},
+      async startSession() {},
+      async generateReply() {
+        return null;
+      },
+      async appendInputAudioFrame() {},
+      async commitInputAudio() {},
+      isEnabled() {
+        return true;
+      },
+      setEventSink() {},
+      async syncCompanionIdentity() {},
+    },
+    readVolcengineVoiceChatTransportConfig({
+      VOLCENGINE_VOICECHAT_TRANSPORT_MODE: 'native',
+    }),
+  );
+
+  transport.setSessionBlueprint({
+    generatedAt: new Date().toISOString(),
+    transport: {
+      providerMode: 'voiceChat',
+      lifecycle: 'startVoiceChat-compatible',
+      migrationTarget: 'StartVoiceChat + Function Calling + MCP + Memory',
+    },
+    assistant: {
+      displayName: 'CelCat',
+      identityNotes: [],
+      systemPrompt: 'test',
+    },
+    memory: {
+      stablePreferences: [],
+      relevantMemories: [],
+      longTermMemories: [],
+    },
+    capabilities: {
+      tools: [],
+      mcpServers: [],
+    },
+    nativeSessionConfig: {
+      systemMessages: [],
+      functions: [],
+      mcps: [],
+      memory: {
+        stablePreferences: [],
+        relevantMemories: [],
+        longTermMemories: [],
+      },
+      activeTaskSummary: null,
+    },
+    activeTask: null,
+  });
+
+  assert.deepEqual(calls, [
+    ['setTransportLifecycleMode', 'voiceChatNative'],
   ]);
 });

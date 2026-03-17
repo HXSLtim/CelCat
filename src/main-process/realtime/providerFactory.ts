@@ -7,6 +7,7 @@ import {
   readCompanionProviderModeConfig,
   type CompanionProviderModeConfig,
 } from './providerMode';
+import { logDebug } from '../../shared/debugLogger';
 import { VolcengineVoiceChatProviderClient } from './voiceChatProvider';
 import { VoiceChatToolExecutor } from './voiceChatToolExecutor';
 import { buildVoiceChatSessionBlueprint } from './voiceChatSessionBlueprint';
@@ -62,15 +63,18 @@ export function createCompanionProviderForMode(
   config: CompanionProviderModeConfig,
   runtime: CompanionProviderRuntime = {},
 ): CompanionProvider {
+  logDebug('provider', 'Resolved companion provider mode', {
+    mode: config.mode,
+    hasRuntimeOrchestrator: Boolean(runtime.orchestrator),
+  });
   if (config.mode === 'voiceChat') {
-    const sessionContext = runtime.orchestrator?.getVoiceChatSessionContext?.() ?? null;
     return new VolcengineVoiceChatProviderClient(
       new VolcengineVoiceChatTransportClient(),
       runtime.orchestrator ? new VoiceChatToolExecutor(runtime.orchestrator) : null,
       () => buildVoiceChatSessionBlueprint({
         env: process.env,
         cwd: process.cwd(),
-        companionIdentity: sessionContext?.companionIdentity
+        companionIdentity: (runtime.orchestrator?.getVoiceChatSessionContext?.() ?? null)?.companionIdentity
           ?? (() => {
             const identity = runtime.orchestrator?.getCompanionIdentity?.();
             return identity
@@ -81,8 +85,8 @@ export function createCompanionProviderForMode(
               : null;
           })()
           ?? null,
-        memoryContext: sessionContext?.memoryContext ?? null,
-        latestTask: sessionContext?.latestTask ?? null,
+        memoryContext: (runtime.orchestrator?.getVoiceChatSessionContext?.() ?? null)?.memoryContext ?? null,
+        latestTask: (runtime.orchestrator?.getVoiceChatSessionContext?.() ?? null)?.latestTask ?? null,
       }),
     );
   }

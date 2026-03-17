@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 
 const {
   buildVoiceChatSessionBlueprint,
+  buildVoiceChatStartConfig,
   buildVoiceChatCompatibilityContextBlock,
 } = require('../dist/main-process/realtime/voiceChatSessionBlueprint.js');
 
@@ -59,6 +60,8 @@ test('buildVoiceChatSessionBlueprint includes tools, mcp servers, memory, and ac
   assert.equal(blueprint.capabilities.tools.some((tool) => tool.id === 'openBrowser'), true);
   assert.equal(blueprint.capabilities.mcpServers.some((capability) => capability.label === 'Figma Bridge'), true);
   assert.equal(blueprint.memory.relevantMemories.length, 1);
+  assert.equal(blueprint.nativeSessionConfig.functions.some((tool) => tool.name === 'openBrowser'), true);
+  assert.equal(blueprint.nativeSessionConfig.mcps.some((capability) => capability.label === 'Figma Bridge'), true);
   assert.equal(blueprint.activeTask?.id, 'task-1');
 });
 
@@ -85,4 +88,60 @@ test('buildVoiceChatCompatibilityContextBlock renders a compact session summary 
   assert.match(block, /稳定偏好：偏好中文、直接执行。/);
   assert.match(block, /已注册工具：/);
   assert.match(block, /可用 MCP：/);
+});
+
+test('buildVoiceChatSessionBlueprint system prompt distinguishes rename requests from name questions', () => {
+  const blueprint = buildVoiceChatSessionBlueprint({
+    companionIdentity: {
+      displayName: 'CelCat',
+      identityNotes: ['你是一个自然陪伴型的中文桌宠 companion。'],
+      updatedAt: new Date().toISOString(),
+    },
+    memoryContext: {
+      stablePreferences: [],
+      recentMemories: [],
+      relevantMemories: [],
+      longTermMemories: [],
+      capabilitySignals: [],
+    },
+    latestTask: null,
+  });
+
+  assert.match(blueprint.assistant.systemPrompt, /你叫什么名字.*不要调用 renameCompanion/);
+  assert.match(blueprint.assistant.systemPrompt, /只有当用户明确要求你改名/);
+});
+
+test('buildVoiceChatStartConfig serializes native voiceChat-oriented fields from the blueprint', () => {
+  const blueprint = buildVoiceChatSessionBlueprint({
+    companionIdentity: {
+      displayName: '小影',
+      identityNotes: ['你会延续和用户之间的熟悉感。'],
+      updatedAt: new Date().toISOString(),
+    },
+    memoryContext: {
+      stablePreferences: ['偏好中文、直接执行。'],
+      recentMemories: [],
+      relevantMemories: [{
+        title: '浏览器偏好',
+        kind: 'tool',
+        summary: '用户经常直接要求你打开浏览器和网页。',
+        score: 3,
+      }],
+      longTermMemories: [],
+      capabilitySignals: [],
+    },
+    latestTask: {
+      id: 'task-1',
+      title: '后台工具任务',
+      progressSummary: '正在打开浏览器。',
+    },
+  });
+
+  const startConfig = buildVoiceChatStartConfig(blueprint);
+
+  assert.equal(startConfig.systemMessages.some((item) => /小影/.test(item)), true);
+  assert.equal(startConfig.functions.some((item) => item.name === 'openBrowser'), true);
+  assert.equal(Array.isArray(startConfig.mcps), true);
+  assert.equal(startConfig.memory.stablePreferences[0], '偏好中文、直接执行。');
+  assert.match(startConfig.activeTaskSummary, /后台工具任务/);
 });

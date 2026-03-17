@@ -22,7 +22,7 @@ const TOOL_DEFINITIONS: VoiceChatToolDefinition[] = [
   {
     id: 'renameCompanion',
     route: 'identity',
-    description: '更新桌宠当前对外使用的名字与身份认知。',
+    description: '当用户明确要求你改名、换名、以后改叫某个名字时，更新桌宠当前对外使用的名字与身份认知。',
     inputSchema: {
       type: 'object',
       properties: {

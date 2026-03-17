@@ -11,9 +11,9 @@ const {
   getVoiceChatToolDefinitions,
 } = require('../dist/main-process/realtime/voiceChatToolRegistry.js');
 
-test('readCompanionProviderModeConfig defaults to dialogue mode', () => {
+test('readCompanionProviderModeConfig defaults to voiceChat mode', () => {
   const config = readCompanionProviderModeConfig({});
-  assert.equal(config.mode, 'dialogue');
+  assert.equal(config.mode, 'voiceChat');
 });
 
 test('readCompanionProviderModeConfig accepts voiceChat aliases', () => {

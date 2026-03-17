@@ -26,7 +26,9 @@ type VoiceChatSystemOrchestrator = {
 };
 
 const TOOL_CALL_PATTERN = /^\[\[CELCAT_TOOL\s+name=([A-Za-z0-9_-]+)\]\]\s*([\s\S]+)$/i;
+const TOOL_CALL_FRAGMENT_PATTERN = /^\[?\[?\s*CELCAT(?:[_\s-]*TOOL|OL)?\s*name\s*=\s*([A-Za-z0-9_-]+)\s*\]?\]?\s*([\s\S]*)$/i;
 const VALID_TASK_KINDS = new Set<TaskKind>(['codex', 'tool', 'claude', 'mcp']);
+const KNOWN_TOOL_NAMES = ['startAgentTask', 'renameCompanion', 'openBrowser'] as const;
 
 export class VoiceChatToolExecutor {
   constructor(
@@ -122,12 +124,13 @@ export class VoiceChatToolExecutor {
 }
 
 export function parseVoiceChatToolCall(text: string): CompanionToolCall | null {
-  const match = text.trim().match(TOOL_CALL_PATTERN);
+  const normalizedText = text.trim();
+  const match = normalizedText.match(TOOL_CALL_PATTERN);
   if (!match) {
-    return null;
+    return parseRelaxedVoiceChatToolCall(normalizedText);
   }
 
-  const name = match[1].trim();
+  const name = canonicalizeVoiceChatToolName(match[1].trim());
   const rawArguments = match[2].trim();
   const argumentsPayload = safeParseVoiceChatToolArguments(rawArguments);
   if (!name || !argumentsPayload) {
@@ -138,6 +141,22 @@ export function parseVoiceChatToolCall(text: string): CompanionToolCall | null {
     name,
     arguments: argumentsPayload,
   };
+}
+
+export function looksLikeVoiceChatToolDirectiveFragment(text: string): boolean {
+  const normalizedText = text.trim();
+  if (!normalizedText) {
+    return false;
+  }
+
+  if (TOOL_CALL_PATTERN.test(normalizedText) || TOOL_CALL_FRAGMENT_PATTERN.test(normalizedText)) {
+    return true;
+  }
+
+  const lowered = normalizedText.toLowerCase();
+  return lowered.includes('celcat')
+    && lowered.includes('name=')
+    && KNOWN_TOOL_NAMES.some((toolName) => lowered.includes(toolName.toLowerCase()));
 }
 
 function safeParseVoiceChatToolArguments(rawArguments: string): Record<string, unknown> | null {
@@ -151,6 +170,42 @@ function safeParseVoiceChatToolArguments(rawArguments: string): Record<string, u
   }
 
   return null;
+}
+
+function parseRelaxedVoiceChatToolCall(text: string): CompanionToolCall | null {
+  if (!looksLikeVoiceChatToolDirectiveFragment(text)) {
+    return null;
+  }
+
+  const match = text.match(TOOL_CALL_FRAGMENT_PATTERN);
+  if (!match) {
+    return null;
+  }
+
+  const name = canonicalizeVoiceChatToolName(match[1].trim());
+  if (!name) {
+    return null;
+  }
+
+  const rawArguments = match[2].trim();
+  const argumentsPayload = rawArguments
+    ? safeParseVoiceChatToolArguments(rawArguments)
+    : {};
+  if (!argumentsPayload) {
+    return null;
+  }
+
+  return {
+    name,
+    arguments: argumentsPayload,
+  };
+}
+
+function canonicalizeVoiceChatToolName(rawName: string): string | null {
+  const normalizedRawName = rawName.replace(/[\s_-]+/g, '').toLowerCase();
+  return KNOWN_TOOL_NAMES.find((toolName) =>
+    toolName.replace(/[\s_-]+/g, '').toLowerCase() === normalizedRawName,
+  ) ?? null;
 }
 
 function buildOpenBrowserTranscript(input: {

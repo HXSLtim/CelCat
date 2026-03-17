@@ -25,6 +25,18 @@ export const CLIENT_EVENT = {
   chatTextQuery: 501,
 } as const;
 
+export type RealtimeSessionLifecycleMode = 'dialogue' | 'voiceChatShim' | 'voiceChatNative';
+
+export type RealtimeSessionLifecycle = {
+  mode: RealtimeSessionLifecycleMode;
+  protocolFamily: 'dialogue-websocket' | 'native-voicechat-openapi';
+  startEventLabel: 'StartSession' | 'StartVoiceChat';
+  startAckEvent: number;
+  buildStartFrame(sessionId: string, payload: Record<string, unknown>): Buffer;
+  finishEventLabel: 'FinishSession' | 'FinishVoiceChat';
+  buildFinishFrame(sessionId: string): Buffer;
+};
+
 export type ParsedRealtimeResponse =
   | {
       messageType: 'SERVER_FULL_RESPONSE' | 'SERVER_ACK';
@@ -117,6 +129,63 @@ export function buildFinishSessionFrame(sessionId: string): Buffer {
     sessionId,
     Buffer.from('{}', 'utf8'),
   );
+}
+
+export function buildStartVoiceChatShimFrame(sessionId: string, payload: Record<string, unknown>): Buffer {
+  return buildStartSessionFrame(sessionId, payload);
+}
+
+export function buildFinishVoiceChatShimFrame(sessionId: string): Buffer {
+  return buildFinishSessionFrame(sessionId);
+}
+
+export function buildNativeStartVoiceChatFrame(
+  _sessionId: string,
+  _payload: Record<string, unknown>,
+): never {
+  throw new Error('Native StartVoiceChat frame builder is not implemented yet');
+}
+
+export function buildNativeFinishVoiceChatFrame(_sessionId: string): never {
+  throw new Error('Native FinishVoiceChat frame builder is not implemented yet');
+}
+
+export function getRealtimeSessionLifecycle(
+  mode: RealtimeSessionLifecycleMode,
+): RealtimeSessionLifecycle {
+  if (mode === 'voiceChatNative') {
+    return {
+      mode,
+      protocolFamily: 'native-voicechat-openapi',
+      startEventLabel: 'StartVoiceChat',
+      startAckEvent: 150,
+      buildStartFrame: buildNativeStartVoiceChatFrame,
+      finishEventLabel: 'FinishVoiceChat',
+      buildFinishFrame: buildNativeFinishVoiceChatFrame,
+    };
+  }
+
+  if (mode === 'voiceChatShim') {
+    return {
+      mode,
+      protocolFamily: 'dialogue-websocket',
+      startEventLabel: 'StartVoiceChat',
+      startAckEvent: 150,
+      buildStartFrame: buildStartVoiceChatShimFrame,
+      finishEventLabel: 'FinishVoiceChat',
+      buildFinishFrame: buildFinishVoiceChatShimFrame,
+    };
+  }
+
+  return {
+    mode: 'dialogue',
+    protocolFamily: 'dialogue-websocket',
+    startEventLabel: 'StartSession',
+    startAckEvent: 150,
+    buildStartFrame: buildStartSessionFrame,
+    finishEventLabel: 'FinishSession',
+    buildFinishFrame: buildFinishSessionFrame,
+  };
 }
 
 export function buildChatTextQueryFrame(sessionId: string, content: string): Buffer {

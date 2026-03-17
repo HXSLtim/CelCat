@@ -25,11 +25,32 @@ export type VoiceChatSessionBlueprint = {
     tools: VoiceChatToolDefinition[];
     mcpServers: AgentCapabilityCatalogEntry[];
   };
+  nativeSessionConfig: VoiceChatStartConfig;
   activeTask: {
     id: string;
     title: string;
     progressSummary: string;
   } | null;
+};
+
+export type VoiceChatStartConfig = {
+  systemMessages: string[];
+  functions: Array<{
+    name: string;
+    description: string;
+    inputSchema: Record<string, unknown>;
+  }>;
+  mcps: Array<{
+    id: string;
+    label: string;
+    description: string;
+  }>;
+  memory: {
+    stablePreferences: string[];
+    relevantMemories: string[];
+    longTermMemories: string[];
+  };
+  activeTaskSummary: string | null;
 };
 
 export function buildVoiceChatSessionBlueprint(input: {
@@ -79,6 +100,20 @@ export function buildVoiceChatSessionBlueprint(input: {
       tools,
       mcpServers,
     },
+    nativeSessionConfig: buildVoiceChatNativeSessionConfig({
+      displayName,
+      identityNotes,
+      systemPrompt: buildVoiceChatSystemPrompt({
+        displayName,
+        identityNotes,
+      }),
+      stablePreferences: memoryContext?.stablePreferences.slice(0, 4) || [],
+      relevantMemories: memoryContext?.relevantMemories.slice(0, 3).map((memory) => memory.summary) || [],
+      longTermMemories: memoryContext?.longTermMemories.slice(0, 3).map((memory) => memory.summary) || [],
+      tools,
+      mcpServers,
+      latestTask: input.latestTask ?? null,
+    }),
     activeTask: input.latestTask ?? null,
   };
 }
@@ -125,5 +160,104 @@ function buildVoiceChatSystemPrompt(input: {
     `你现在对用户自称“${input.displayName}”。`,
     ...input.identityNotes.map((note) => `- ${note}`),
     '你需要优先用 Function Calling / MCP / 后台 agent 处理执行型任务，而不是口头假装完成。',
+    '如果用户只是问你“你叫什么名字”“你现在叫什么”“你是谁”，直接正常回答，不要调用 renameCompanion。',
+    '只有当用户明确要求你改名、换名、以后改叫某个名字时，才调用 renameCompanion。',
   ].join('\n');
+}
+
+function buildVoiceChatNativeSessionConfig(input: {
+  displayName: string;
+  identityNotes: string[];
+  systemPrompt: string;
+  stablePreferences: string[];
+  relevantMemories: string[];
+  longTermMemories: string[];
+  tools: VoiceChatToolDefinition[];
+  mcpServers: AgentCapabilityCatalogEntry[];
+  latestTask: {
+    id: string;
+    title: string;
+    progressSummary: string;
+  } | null;
+}): VoiceChatStartConfig {
+  return {
+    systemMessages: [
+      input.systemPrompt,
+      input.stablePreferences.length
+        ? `用户稳定偏好：${input.stablePreferences.join('；')}`
+        : '',
+      input.relevantMemories.length
+        ? `相关记忆：${input.relevantMemories.join('；')}`
+        : '',
+      input.longTermMemories.length
+        ? `长期记忆：${input.longTermMemories.join('；')}`
+        : '',
+      input.latestTask
+        ? `当前后台任务：${input.latestTask.title}，进度：${input.latestTask.progressSummary}`
+        : '',
+    ].filter(Boolean),
+    functions: input.tools.map((tool) => ({
+      name: tool.id,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+    })),
+    mcps: input.mcpServers.map((capability) => ({
+      id: capability.id,
+      label: capability.label,
+      description: capability.defaultReason,
+    })),
+    memory: {
+      stablePreferences: input.stablePreferences,
+      relevantMemories: input.relevantMemories,
+      longTermMemories: input.longTermMemories,
+    },
+    activeTaskSummary: input.latestTask
+      ? `${input.latestTask.title}：${input.latestTask.progressSummary}`
+      : null,
+  };
+}
+
+export function buildVoiceChatStartConfig(
+  blueprint: Pick<
+    VoiceChatSessionBlueprint,
+    'assistant' | 'memory' | 'capabilities' | 'activeTask'
+  > & {
+    nativeSessionConfig?: VoiceChatStartConfig;
+  },
+): VoiceChatStartConfig {
+  return {
+    systemMessages: blueprint.nativeSessionConfig?.systemMessages.slice() || [
+      blueprint.assistant.systemPrompt,
+      blueprint.memory.stablePreferences.length
+        ? `用户稳定偏好：${blueprint.memory.stablePreferences.join('；')}`
+        : '',
+      blueprint.memory.relevantMemories.length
+        ? `相关记忆：${blueprint.memory.relevantMemories.join('；')}`
+        : '',
+      blueprint.memory.longTermMemories.length
+        ? `长期记忆：${blueprint.memory.longTermMemories.join('；')}`
+        : '',
+      blueprint.activeTask
+        ? `当前后台任务：${blueprint.activeTask.title}，进度：${blueprint.activeTask.progressSummary}`
+        : '',
+    ].filter(Boolean),
+    functions: blueprint.capabilities.tools.map((tool) => ({
+      name: tool.id,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+    })),
+    mcps: blueprint.capabilities.mcpServers.map((capability) => ({
+      id: capability.id,
+      label: capability.label,
+      description: capability.defaultReason,
+    })),
+    memory: {
+      stablePreferences: blueprint.memory.stablePreferences.slice(),
+      relevantMemories: blueprint.memory.relevantMemories.slice(),
+      longTermMemories: blueprint.memory.longTermMemories.slice(),
+    },
+    activeTaskSummary: blueprint.activeTask
+      ? `${blueprint.activeTask.title}：${blueprint.activeTask.progressSummary}`
+      : null,
+  };
 }

@@ -3,14 +3,19 @@ const assert = require('node:assert/strict');
 
 const {
   VolcengineRealtimeProviderClient,
+  buildLifecycleStartSessionPayload,
+  buildVoiceChatShimSystemRole,
   buildVolcengineRealtimeHeaders,
   readVolcengineRealtimeConfig,
 } = require('../dist/main-process/realtime/providerClient.js');
 const {
   buildChatTextQueryFrame,
+  buildFinishVoiceChatShimFrame,
+  getRealtimeSessionLifecycle,
   buildSayHelloFrame,
   buildStartConnectionFrame,
   buildStartSessionFrame,
+  buildStartVoiceChatShimFrame,
   buildTaskRequestFrame,
   parseRealtimeResponse,
 } = require('../dist/main-process/realtime/protocol.js');
@@ -103,6 +108,207 @@ test('protocol helpers build and parse binary realtime frames', () => {
   assert.equal(parsed.messageType, 'SERVER_FULL_RESPONSE');
   assert.equal(parsed.event, 501);
   assert.deepEqual(parsed.payload, { text: 'hello' });
+});
+
+test('realtime session lifecycle exposes a voiceChat shim strategy without changing frame compatibility yet', () => {
+  const lifecycle = getRealtimeSessionLifecycle('voiceChatShim');
+
+  assert.equal(lifecycle.protocolFamily, 'dialogue-websocket');
+  assert.equal(lifecycle.startEventLabel, 'StartVoiceChat');
+  assert.equal(lifecycle.finishEventLabel, 'FinishVoiceChat');
+  assert.equal(lifecycle.buildStartFrame, buildStartVoiceChatShimFrame);
+  assert.equal(lifecycle.buildFinishFrame, buildFinishVoiceChatShimFrame);
+  assert.equal(Buffer.isBuffer(lifecycle.buildStartFrame('session-1', { dialog: { bot_name: '豆包' } })), true);
+});
+
+test('realtime session lifecycle exposes a native voiceChat strategy placeholder', () => {
+  const lifecycle = getRealtimeSessionLifecycle('voiceChatNative');
+
+  assert.equal(lifecycle.protocolFamily, 'native-voicechat-openapi');
+  assert.equal(lifecycle.startEventLabel, 'StartVoiceChat');
+  assert.equal(lifecycle.finishEventLabel, 'FinishVoiceChat');
+  assert.throws(
+    () => lifecycle.buildStartFrame('session-1', { session: { botName: '豆包' } }),
+    /Native StartVoiceChat frame builder is not implemented yet/,
+  );
+});
+
+test('buildLifecycleStartSessionPayload keeps dialogue mode on the legacy session schema', () => {
+  const payload = buildLifecycleStartSessionPayload({
+    lifecycleMode: 'dialogue',
+    config: {
+      enabled: true,
+      address: 'wss://openspeech.bytedance.com',
+      uri: '/api/v3/realtime/dialogue',
+      appId: 'app-id',
+      appKey: 'app-key',
+      accessToken: 'access-token',
+      resourceId: 'volc.speech.dialog',
+      uid: 'celcat-test',
+      botName: '豆包',
+      headersJson: '',
+      appendEventName: 'input_audio_buffer.append',
+      commitEventName: 'input_audio_buffer.commit',
+      systemRole: '你是测试助手。',
+      speakingStyle: '简洁',
+      speaker: 'speaker',
+      ttsFormat: 'pcm_s16le',
+      ttsSampleRate: 24000,
+    },
+  });
+
+  assert.equal(payload.dialog.bot_name, '豆包');
+  assert.match(payload.dialog.system_role, /你是测试助手/);
+  assert.equal(payload.dialog.extra.input_mod, 'audio');
+});
+
+test('buildLifecycleStartSessionPayload folds voiceChat blueprint context into the dialogue-compatible shim payload', () => {
+  const payload = buildLifecycleStartSessionPayload({
+    lifecycleMode: 'voiceChatShim',
+    config: {
+      enabled: true,
+      address: 'wss://openspeech.bytedance.com',
+      uri: '/api/v3/realtime/dialogue',
+      appId: 'app-id',
+      appKey: 'app-key',
+      accessToken: 'access-token',
+      resourceId: 'volc.speech.dialog',
+      uid: 'celcat-test',
+      botName: '小影',
+      headersJson: '',
+      appendEventName: 'input_audio_buffer.append',
+      commitEventName: 'input_audio_buffer.commit',
+      systemRole: '你是一个温柔的中文桌宠。',
+      speakingStyle: '简洁',
+      speaker: 'speaker',
+      ttsFormat: 'pcm_s16le',
+      ttsSampleRate: 24000,
+    },
+    botNameOverride: '豆包',
+    voiceChatStartConfig: {
+      systemMessages: ['你现在对用户自称“豆包”。', '优先用 Function Calling 处理执行型任务。'],
+      functions: [
+        {
+          name: 'openBrowser',
+          description: '打开浏览器并访问目标网页',
+          inputSchema: { type: 'object' },
+        },
+      ],
+      mcps: [
+        {
+          id: 'playwright',
+          label: 'Playwright',
+          description: '浏览器自动化',
+        },
+      ],
+      memory: {
+        stablePreferences: ['偏好中文、直接执行。'],
+        relevantMemories: ['用户经常要求打开浏览器。'],
+        longTermMemories: [],
+      },
+      activeTaskSummary: '打开浏览器：处理中',
+    },
+  });
+
+  assert.equal(payload.dialog.bot_name, '豆包');
+  assert.equal(payload.dialog.extra.compatibility_mode, 'voiceChatShim');
+  assert.deepEqual(payload.dialog.extra.celcat_voice_chat.function_names, ['openBrowser']);
+  assert.deepEqual(payload.dialog.extra.celcat_voice_chat.mcp_ids, ['playwright']);
+  assert.match(payload.dialog.system_role, /Function Calling/);
+  assert.match(payload.dialog.system_role, /openBrowser/);
+  assert.match(payload.dialog.system_role, /Playwright/);
+  assert.match(payload.dialog.system_role, /偏好中文、直接执行/);
+  assert.match(payload.dialog.system_role, /打开浏览器：处理中/);
+  assert.match(payload.dialog.system_role, /\[\[CELCAT_TOOL name=/);
+  assert.match(payload.dialog.system_role, /不要口头拒绝/);
+});
+
+test('buildVoiceChatShimSystemRole preserves the active display name in shim mode', () => {
+  const systemRole = buildVoiceChatShimSystemRole({
+    config: {
+      enabled: true,
+      address: 'wss://openspeech.bytedance.com',
+      uri: '/api/v3/realtime/dialogue',
+      appId: 'app-id',
+      appKey: 'app-key',
+      accessToken: 'access-token',
+      resourceId: 'volc.speech.dialog',
+      uid: 'celcat-test',
+      botName: '小影',
+      headersJson: '',
+      appendEventName: 'input_audio_buffer.append',
+      commitEventName: 'input_audio_buffer.commit',
+      systemRole: '你是一个温柔的中文桌宠。',
+      speakingStyle: '简洁',
+      speaker: 'speaker',
+      ttsFormat: 'pcm_s16le',
+      ttsSampleRate: 24000,
+    },
+    botName: '豆包',
+    voiceChatStartConfig: {
+      systemMessages: [],
+      functions: [],
+      mcps: [],
+      memory: {
+        stablePreferences: [],
+        relevantMemories: [],
+        longTermMemories: [],
+      },
+      activeTaskSummary: null,
+    },
+  });
+
+  assert.match(systemRole, /你的当前名字是“豆包”/);
+});
+
+test('buildLifecycleStartSessionPayload exposes a native StartVoiceChat payload placeholder', () => {
+  const payload = buildLifecycleStartSessionPayload({
+    lifecycleMode: 'voiceChatNative',
+    config: {
+      enabled: true,
+      address: 'wss://openspeech.bytedance.com',
+      uri: '/api/v3/realtime/dialogue',
+      appId: 'app-id',
+      appKey: 'app-key',
+      accessToken: 'access-token',
+      resourceId: 'volc.speech.dialog',
+      uid: 'celcat-test',
+      botName: '豆包',
+      headersJson: '',
+      appendEventName: 'input_audio_buffer.append',
+      commitEventName: 'input_audio_buffer.commit',
+      systemRole: '你是一个温柔的中文桌宠。',
+      speakingStyle: '简洁',
+      speaker: 'speaker',
+      ttsFormat: 'pcm_s16le',
+      ttsSampleRate: 24000,
+    },
+    voiceChatStartConfig: {
+      systemMessages: ['你现在对用户自称“豆包”。'],
+      functions: [{
+        name: 'openBrowser',
+        description: '打开浏览器',
+        inputSchema: { type: 'object' },
+      }],
+      mcps: [{
+        id: 'playwright',
+        label: 'Playwright',
+        description: '浏览器自动化',
+      }],
+      memory: {
+        stablePreferences: ['偏好中文、直接执行。'],
+        relevantMemories: [],
+        longTermMemories: [],
+      },
+      activeTaskSummary: '后台工具任务：处理中',
+    },
+  });
+
+  assert.equal(payload.transport.mode, 'voiceChatNative');
+  assert.equal(payload.session.startEvent, 'StartVoiceChat');
+  assert.equal(payload.llm.tools[0].name, 'openBrowser');
+  assert.equal(payload.llm.mcps[0].id, 'playwright');
+  assert.equal(payload.memory.stablePreferences[0], '偏好中文、直接执行。');
 });
 
 test('VolcengineRealtimeProviderClient concatenates assistant text deltas instead of replacing them', () => {

@@ -10,10 +10,14 @@ import {
   VolcengineRealtimeProviderClient,
   readVolcengineRealtimeConfig,
 } from './providerClient';
-import type { VoiceChatSessionBlueprint } from './voiceChatSessionBlueprint';
+import { buildVoiceChatStartConfig, type VoiceChatSessionBlueprint } from './voiceChatSessionBlueprint';
+import type { RealtimeSessionLifecycleMode } from './protocol';
 
 export type VolcengineVoiceChatTransportConfig = VolcengineRealtimeConfig & {
   transportLabel: 'voiceChat';
+  transportMode: 'shim' | 'native';
+  protocolFamily: 'dialogue-websocket' | 'native-voicechat-openapi';
+  lifecycleMode: RealtimeSessionLifecycleMode;
   startEventName: string;
   appendEventName: string;
   commitEventName: string;
@@ -27,6 +31,7 @@ export function readVolcengineVoiceChatTransportConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): VolcengineVoiceChatTransportConfig {
   const baseConfig = readVolcengineRealtimeConfig(env);
+  const transportMode = resolveVoiceChatTransportMode(env.VOLCENGINE_VOICECHAT_TRANSPORT_MODE);
   return {
     ...baseConfig,
     enabled: env.VOLCENGINE_VOICECHAT_ENABLED
@@ -49,6 +54,9 @@ export function readVolcengineVoiceChatTransportConfig(
     appendEventName: env.VOLCENGINE_VOICECHAT_APPEND_EVENT || baseConfig.appendEventName,
     commitEventName: env.VOLCENGINE_VOICECHAT_COMMIT_EVENT || baseConfig.commitEventName,
     transportLabel: 'voiceChat',
+    transportMode,
+    protocolFamily: transportMode === 'native' ? 'native-voicechat-openapi' : 'dialogue-websocket',
+    lifecycleMode: transportMode === 'native' ? 'voiceChatNative' : 'voiceChatShim',
   };
 }
 
@@ -64,22 +72,39 @@ export class VolcengineVoiceChatTransportClient implements VoiceChatTransportLik
 
   setSessionBlueprint(blueprint: VoiceChatSessionBlueprint | null): void {
     this.sessionBlueprint = blueprint;
+    const startConfig = blueprint ? buildVoiceChatStartConfig(blueprint) : null;
+    if ('setTransportLifecycleMode' in this.baseClient && typeof this.baseClient.setTransportLifecycleMode === 'function') {
+      this.baseClient.setTransportLifecycleMode(this.config.lifecycleMode);
+    }
+    if ('setVoiceChatStartConfig' in this.baseClient && typeof this.baseClient.setVoiceChatStartConfig === 'function') {
+      this.baseClient.setVoiceChatStartConfig(startConfig);
+    }
+    if ('setSessionSystemRole' in this.baseClient && typeof this.baseClient.setSessionSystemRole === 'function') {
+      this.baseClient.setSessionSystemRole(blueprint ? buildVoiceChatSessionSystemRole(blueprint) : null);
+    }
     logDebug('provider', 'VoiceChat transport received session blueprint', {
       startEventName: this.config.startEventName,
+      transportMode: this.config.transportMode,
+      protocolFamily: this.config.protocolFamily,
       hasBlueprint: Boolean(blueprint),
       displayName: blueprint?.assistant.displayName ?? null,
       toolCount: blueprint?.capabilities.tools.length ?? 0,
       mcpCount: blueprint?.capabilities.mcpServers.length ?? 0,
+      nativeSystemMessageCount: startConfig?.systemMessages.length ?? 0,
     });
   }
 
   connect(): Promise<void> {
-    logDebug('provider', 'Connecting via dedicated voiceChat transport shim', {
+    logDebug('provider', 'Connecting via dedicated voiceChat transport', {
       address: this.config.address,
       uri: this.config.uri,
       resourceId: this.config.resourceId,
       startEventName: this.config.startEventName,
-      migrationMode: 'dialogue-compatible-transport-shim',
+      transportMode: this.config.transportMode,
+      protocolFamily: this.config.protocolFamily,
+      migrationMode: this.config.transportMode === 'native'
+        ? 'native-startvoicechat-transport'
+        : 'dialogue-compatible-transport-shim',
     });
     return this.baseClient.connect();
   }
@@ -89,11 +114,16 @@ export class VolcengineVoiceChatTransportClient implements VoiceChatTransportLik
   }
 
   startSession(): Promise<void> {
+    const startConfig = this.sessionBlueprint ? buildVoiceChatStartConfig(this.sessionBlueprint) : null;
     logDebug('provider', 'Starting voiceChat transport session', {
       displayName: this.sessionBlueprint?.assistant.displayName ?? this.config.botName,
       toolCount: this.sessionBlueprint?.capabilities.tools.length ?? 0,
       mcpCount: this.sessionBlueprint?.capabilities.mcpServers.length ?? 0,
+      nativeFunctionCount: startConfig?.functions.length ?? 0,
+      nativeMcpCount: startConfig?.mcps.length ?? 0,
       hasActiveTask: Boolean(this.sessionBlueprint?.activeTask),
+      transportMode: this.config.transportMode,
+      protocolFamily: this.config.protocolFamily,
       lifecycle: this.sessionBlueprint?.transport.lifecycle ?? 'startVoiceChat-compatible',
     });
     return this.baseClient.startSession();
@@ -137,4 +167,45 @@ export class VolcengineVoiceChatTransportClient implements VoiceChatTransportLik
       ? this.baseClient.executeToolCall(toolCall)
       : Promise.resolve(null);
   }
+}
+
+function buildVoiceChatSessionSystemRole(blueprint: VoiceChatSessionBlueprint): string {
+  const toolSummary = blueprint.capabilities.tools
+    .map((tool) => `${tool.id}: ${tool.description}`)
+    .join('；');
+  const mcpSummary = blueprint.capabilities.mcpServers.length
+    ? blueprint.capabilities.mcpServers
+      .slice(0, 4)
+      .map((capability) => `${capability.label}: ${capability.defaultReason}`)
+      .join('；')
+    : '当前没有额外 MCP。';
+  const sections = [
+    blueprint.assistant.systemPrompt,
+    blueprint.memory.stablePreferences.length
+      ? `用户稳定偏好：${blueprint.memory.stablePreferences.join('；')}`
+      : '',
+    blueprint.memory.relevantMemories.length
+      ? `相关记忆：${blueprint.memory.relevantMemories.join('；')}`
+      : '',
+    blueprint.memory.longTermMemories.length
+      ? `长期记忆：${blueprint.memory.longTermMemories.join('；')}`
+      : '',
+    `可用工具：${toolSummary}`,
+    `可用 MCP：${mcpSummary}`,
+    blueprint.activeTask
+      ? `当前后台任务：${blueprint.activeTask.title}，进度：${blueprint.activeTask.progressSummary}`
+      : '',
+    '如果用户明确要求你改名、换名、以后改叫某个名字，优先输出 [[CELCAT_TOOL name=renameCompanion]]{"displayName":"新名字"}。',
+    '如果用户要求打开浏览器、访问网页、搜索资料或执行任务，优先输出对应工具调用，而不是口头拒绝。',
+    '如果只是普通聊天，就自然直接回复，不要输出工具调用。',
+  ].filter(Boolean);
+
+  return sections.join('\n').slice(0, 2400);
+}
+
+function resolveVoiceChatTransportMode(rawMode?: string): 'shim' | 'native' {
+  const normalized = (rawMode || 'shim').trim().toLowerCase();
+  return normalized === 'native' || normalized === 'startvoicechat-native'
+    ? 'native'
+    : 'shim';
 }

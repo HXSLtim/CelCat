@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 
 const {
   VoiceChatToolExecutor,
+  looksLikeVoiceChatToolDirectiveFragment,
   parseVoiceChatToolCall,
 } = require('../dist/main-process/realtime/voiceChatToolExecutor.js');
 const { VolcengineVoiceChatProviderClient } = require('../dist/main-process/realtime/voiceChatProvider.js');
@@ -16,6 +17,16 @@ test('parseVoiceChatToolCall parses compatibility tool directives', () => {
       displayName: '小影',
     },
   });
+});
+
+test('parseVoiceChatToolCall tolerates malformed streamed compatibility fragments for openBrowser', () => {
+  const parsed = parseVoiceChatToolCall('CELCATOLname=openbrowser]]');
+
+  assert.deepEqual(parsed, {
+    name: 'openBrowser',
+    arguments: {},
+  });
+  assert.equal(looksLikeVoiceChatToolDirectiveFragment('CELCATOLname=openbrowser]]'), true);
 });
 
 test('VoiceChatToolExecutor maps rename and agent calls into orchestrator system APIs', async () => {
@@ -165,6 +176,70 @@ test('VolcengineVoiceChatProviderClient exposes structured reply payloads for co
   });
 });
 
+test('VolcengineVoiceChatProviderClient injects rename guidance into the compatibility prompt', async () => {
+  let capturedPrompt = '';
+  const provider = new VolcengineVoiceChatProviderClient(
+    {
+      async connect() {},
+      async disconnect() {},
+      async startSession() {},
+      async generateReply(input) {
+        capturedPrompt = input;
+        return '我叫CelCat。';
+      },
+      async appendInputAudioFrame() {},
+      async commitInputAudio() {},
+      isEnabled() {
+        return true;
+      },
+      setEventSink() {},
+      async syncCompanionIdentity() {},
+    },
+    new VoiceChatToolExecutor({
+      startAgentTaskFromSystem() {
+        return null;
+      },
+      renameCompanionFromSystem() {
+        return null;
+      },
+      getCompanionIdentity() {
+        return {
+          displayName: 'CelCat',
+        };
+      },
+    }),
+    () => ({
+      generatedAt: new Date().toISOString(),
+      transport: {
+        providerMode: 'voiceChat',
+        lifecycle: 'startVoiceChat-compatible',
+        migrationTarget: 'StartVoiceChat + Function Calling + MCP + Memory',
+      },
+      assistant: {
+        displayName: 'CelCat',
+        identityNotes: ['你是一个自然陪伴型的中文桌宠 companion。'],
+        systemPrompt: 'test',
+      },
+      memory: {
+        stablePreferences: [],
+        relevantMemories: [],
+        longTermMemories: [],
+      },
+      capabilities: {
+        tools: [],
+        mcpServers: [],
+      },
+      activeTask: null,
+    }),
+  );
+
+  await provider.generateReplyPayload('你叫什么名字');
+
+  assert.match(capturedPrompt, /如果用户只是问“你叫什么名字”/);
+  assert.match(capturedPrompt, /正例：“以后叫你小影”/);
+  assert.match(capturedPrompt, /反例：“你叫什么名字”/);
+});
+
 test('VolcengineVoiceChatProviderClient does not sync identity inside executeToolCall', async () => {
   const calls = [];
   const provider = new VolcengineVoiceChatProviderClient(
@@ -217,4 +292,57 @@ test('VolcengineVoiceChatProviderClient does not sync identity inside executeToo
 
   assert.equal(result?.syncCompanionIdentity, '小影');
   assert.deepEqual(calls, []);
+});
+
+test('VolcengineVoiceChatProviderClient suppresses malformed streamed tool fragments and emits a tool-call', async () => {
+  const forwardedEvents = [];
+  let baseSink = null;
+  const provider = new VolcengineVoiceChatProviderClient(
+    {
+      async connect() {},
+      async disconnect() {},
+      async startSession() {},
+      async generateReply() {
+        return null;
+      },
+      async appendInputAudioFrame() {},
+      async commitInputAudio() {},
+      isEnabled() {
+        return true;
+      },
+      setEventSink(listener) {
+        baseSink = listener;
+      },
+      async syncCompanionIdentity() {},
+    },
+    new VoiceChatToolExecutor({
+      startAgentTaskFromSystem() {
+        return null;
+      },
+      renameCompanionFromSystem() {
+        return null;
+      },
+      getCompanionIdentity() {
+        return {
+          displayName: 'CelCat',
+        };
+      },
+    }),
+  );
+
+  provider.setEventSink((event) => {
+    forwardedEvents.push(event);
+  });
+
+  baseSink({ type: 'assistant-message', text: 'CELCATOLname=openbrowser', isFinal: false });
+  baseSink({ type: 'assistant-message', text: 'CELCATOLname=openbrowser]]', isFinal: true });
+
+  assert.deepEqual(forwardedEvents, [
+    {
+      type: 'tool-call',
+      toolName: 'openBrowser',
+      arguments: {},
+      rawText: 'CELCATOLname=openbrowser]]',
+    },
+  ]);
 });

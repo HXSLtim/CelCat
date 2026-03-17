@@ -622,6 +622,325 @@ test('SessionManager intercepts provider transcripts when local orchestrator tak
   assert.equal(sessionManager.getSnapshot().activeTaskId, 'task-browser');
 });
 
+test('SessionManager flushes buffered realtime provider output when routing misses the realtime deadline', async () => {
+  const emittedEvents = [];
+  let eventSink = null;
+  let resolveRoutingDecision = null;
+
+  const sessionManager = new SessionManager({
+    transcribeAudio: async () => ({ text: '你好' }),
+    orchestrator: {
+      async handleTranscript() {
+        return {
+          relatedTask: null,
+          companionRequest: null,
+          events: [],
+        };
+      },
+      async handleRealtimeProviderTranscript() {
+        return await new Promise((resolve) => {
+          resolveRoutingDecision = resolve;
+        });
+      },
+      getCompanionIdentity() {
+        return {
+          displayName: '小影',
+        };
+      },
+    },
+    companionProvider: {
+      setEventSink(listener) {
+        eventSink = listener;
+      },
+      async connect() {},
+      async disconnect() {},
+      async startSession() {},
+      async generateReply() {
+        return null;
+      },
+      async syncCompanionIdentity() {},
+      async appendInputAudioFrame() {},
+      async commitInputAudio() {},
+      isEnabled() {
+        return true;
+      },
+    },
+    realtimeRoutingDecisionDeadlineMs: 20,
+    emitEvent(event) {
+      emittedEvents.push(event);
+    },
+  });
+
+  await sessionManager.startSession();
+  eventSink({ type: 'transcript', text: '你是谁呀？' });
+  eventSink({
+    type: 'assistant-audio',
+    pcmBase64: 'abc',
+    sampleRate: 16000,
+    channels: 1,
+    format: 'pcm_s16le',
+  });
+  eventSink({
+    type: 'assistant-message',
+    text: '我是小影呀，很高兴认识你！',
+    isFinal: true,
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(
+    emittedEvents.some((event) => event.type === 'assistant-message' && event.text === '我是小影呀，很高兴认识你！'),
+    false,
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  assert.equal(
+    emittedEvents.some((event) => event.type === 'assistant-audio' && event.pcmBase64 === 'abc'),
+    true,
+  );
+  assert.equal(
+    emittedEvents.some((event) => event.type === 'assistant-message' && event.text === '我是小影呀，很高兴认识你！'),
+    true,
+  );
+
+  resolveRoutingDecision(null);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+});
+
+test('SessionManager drops malformed compatibility directive fragments when the realtime routing deadline is exceeded', async () => {
+  const emittedEvents = [];
+  let eventSink = null;
+  let resolveRoutingDecision = null;
+
+  const sessionManager = new SessionManager({
+    transcribeAudio: async () => ({ text: '你好' }),
+    orchestrator: {
+      async handleTranscript() {
+        return {
+          relatedTask: null,
+          companionRequest: null,
+          events: [],
+        };
+      },
+      async handleRealtimeProviderTranscript() {
+        return await new Promise((resolve) => {
+          resolveRoutingDecision = resolve;
+        });
+      },
+      getCompanionIdentity() {
+        return {
+          displayName: '小影',
+        };
+      },
+    },
+    companionProvider: {
+      setEventSink(listener) {
+        eventSink = listener;
+      },
+      async connect() {},
+      async disconnect() {},
+      async startSession() {},
+      async generateReply() {
+        return null;
+      },
+      async syncCompanionIdentity() {},
+      async appendInputAudioFrame() {},
+      async commitInputAudio() {},
+      isEnabled() {
+        return true;
+      },
+    },
+    realtimeRoutingDecisionDeadlineMs: 20,
+    emitEvent(event) {
+      emittedEvents.push(event);
+    },
+  });
+
+  await sessionManager.startSession();
+  eventSink({ type: 'transcript', text: '帮我打开一下浏览器。' });
+  eventSink({
+    type: 'assistant-audio',
+    pcmBase64: 'abc',
+    sampleRate: 16000,
+    channels: 1,
+    format: 'pcm_s16le',
+  });
+  eventSink({
+    type: 'assistant-message',
+    text: 'CELCATOLname=openbrowser]]',
+    isFinal: true,
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  assert.equal(
+    emittedEvents.some((event) => event.type === 'assistant-message' && /CELCATOLname/.test(event.text)),
+    false,
+  );
+  assert.equal(
+    emittedEvents.some((event) => event.type === 'assistant-audio' && event.pcmBase64 === 'abc'),
+    false,
+  );
+
+  resolveRoutingDecision(null);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+});
+
+test('SessionManager still applies a late realtime routing takeover after provider output was released', async () => {
+  const emittedEvents = [];
+  let eventSink = null;
+  let resolveRoutingDecision = null;
+
+  const sessionManager = new SessionManager({
+    transcribeAudio: async () => ({ text: '你好' }),
+    orchestrator: {
+      async handleTranscript() {
+        return {
+          relatedTask: null,
+          companionRequest: null,
+          events: [],
+        };
+      },
+      async handleRealtimeProviderTranscript() {
+        return await new Promise((resolve) => {
+          resolveRoutingDecision = resolve;
+        });
+      },
+      getCompanionIdentity() {
+        return {
+          displayName: '小影',
+        };
+      },
+    },
+    companionProvider: {
+      setEventSink(listener) {
+        eventSink = listener;
+      },
+      async connect() {},
+      async disconnect() {},
+      async startSession() {},
+      async generateReply() {
+        return null;
+      },
+      async syncCompanionIdentity() {},
+      async appendInputAudioFrame() {},
+      async commitInputAudio() {},
+      isEnabled() {
+        return true;
+      },
+    },
+    realtimeRoutingDecisionDeadlineMs: 20,
+    emitEvent(event) {
+      emittedEvents.push(event);
+    },
+  });
+
+  await sessionManager.startSession();
+  eventSink({ type: 'transcript', text: '帮我打开一下浏览器。' });
+  eventSink({
+    type: 'assistant-message',
+    text: '不好意思啊，我没办法帮你打开浏览器呢。',
+    isFinal: true,
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  resolveRoutingDecision({
+    relatedTask: { id: 'task-late' },
+    companionRequest: null,
+    events: [
+      {
+        type: 'assistant-message',
+        text: '好的，我已经把这件事交给后台 agent 处理了。',
+        relatedTaskId: 'task-late',
+      },
+    ],
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(
+    emittedEvents.some((event) => event.type === 'assistant-message' && event.text === '不好意思啊，我没办法帮你打开浏览器呢。'),
+    true,
+  );
+  assert.equal(
+    emittedEvents.some((event) => event.type === 'assistant-message' && event.text === '好的，我已经把这件事交给后台 agent 处理了。'),
+    true,
+  );
+  assert.equal(sessionManager.getSnapshot().activeTaskId, 'task-late');
+});
+
+test('SessionManager discards buffered realtime provider output when a new transcript supersedes the turn', async () => {
+  const emittedEvents = [];
+  let eventSink = null;
+  let resolveFirstRoutingDecision = null;
+
+  const sessionManager = new SessionManager({
+    transcribeAudio: async () => ({ text: '你好' }),
+    orchestrator: {
+      async handleTranscript() {
+        return {
+          relatedTask: null,
+          companionRequest: null,
+          events: [],
+        };
+      },
+      async handleRealtimeProviderTranscript(transcript) {
+        if (transcript === '你是谁呀？') {
+          return await new Promise((resolve) => {
+            resolveFirstRoutingDecision = resolve;
+          });
+        }
+        return null;
+      },
+      getCompanionIdentity() {
+        return {
+          displayName: '小影',
+        };
+      },
+    },
+    companionProvider: {
+      setEventSink(listener) {
+        eventSink = listener;
+      },
+      async connect() {},
+      async disconnect() {},
+      async startSession() {},
+      async generateReply() {
+        return null;
+      },
+      async syncCompanionIdentity() {},
+      async appendInputAudioFrame() {},
+      async commitInputAudio() {},
+      isEnabled() {
+        return true;
+      },
+    },
+    realtimeRoutingDecisionDeadlineMs: 1000,
+    emitEvent(event) {
+      emittedEvents.push(event);
+    },
+  });
+
+  await sessionManager.startSession();
+  eventSink({ type: 'transcript', text: '你是谁呀？' });
+  eventSink({
+    type: 'assistant-message',
+    text: '我是小影呀，很高兴认识你！',
+    isFinal: true,
+  });
+
+  eventSink({ type: 'transcript', text: '帮我打开一下浏览器。' });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(
+    emittedEvents.some((event) => event.type === 'assistant-message' && event.text === '我是小影呀，很高兴认识你！'),
+    false,
+  );
+
+  resolveFirstRoutingDecision(null);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+});
+
 test('SessionManager executes realtime provider tool-call events through the companion provider', async () => {
   const emittedEvents = [];
   let eventSink = null;
@@ -682,6 +1001,84 @@ test('SessionManager executes realtime provider tool-call events through the com
     emittedEvents.some((event) => event.type === 'assistant-message' && event.text === '记住啦，我以后就叫小影。'),
     true,
   );
+});
+
+test('SessionManager prioritizes provider tool calls over pending realtime routing', async () => {
+  const emittedEvents = [];
+  let eventSink = null;
+  let resolveRoutingDecision = null;
+
+  const sessionManager = new SessionManager({
+    transcribeAudio: async () => ({ text: '你好' }),
+    orchestrator: {
+      async handleTranscript() {
+        return {
+          relatedTask: null,
+          companionRequest: null,
+          events: [],
+        };
+      },
+      async handleRealtimeProviderTranscript() {
+        return await new Promise((resolve) => {
+          resolveRoutingDecision = resolve;
+        });
+      },
+      getCompanionIdentity() {
+        return {
+          displayName: 'CelCat',
+        };
+      },
+    },
+    companionProvider: {
+      setEventSink(listener) {
+        eventSink = listener;
+      },
+      async connect() {},
+      async disconnect() {},
+      async startSession() {},
+      async generateReply() {
+        return null;
+      },
+      async executeToolCall(toolCall) {
+        return {
+          toolName: toolCall.name,
+          assistantMessage: '好的，我已经把这件事交给后台 agent 了。',
+          relatedTaskId: 'task-browser',
+          syncCompanionIdentity: null,
+        };
+      },
+      async syncCompanionIdentity() {},
+      async appendInputAudioFrame() {},
+      async commitInputAudio() {},
+      isEnabled() {
+        return true;
+      },
+    },
+    emitEvent(event) {
+      emittedEvents.push(event);
+    },
+  });
+
+  await sessionManager.startSession();
+  eventSink({ type: 'transcript', text: '帮我打开一下浏览器。' });
+  eventSink({
+    type: 'tool-call',
+    toolName: 'openBrowser',
+    arguments: {
+      query: '浏览器',
+    },
+    rawText: '[[CELCAT_TOOL name=openBrowser]]{"query":"浏览器"}',
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(
+    emittedEvents.some((event) => event.type === 'assistant-message' && event.text === '好的，我已经把这件事交给后台 agent 了。'),
+    true,
+  );
+  assert.equal(sessionManager.getSnapshot().activeTaskId, 'task-browser');
+
+  resolveRoutingDecision(null);
+  await new Promise((resolve) => setTimeout(resolve, 0));
 });
 
 test('SessionManager defers provider tool-call rename sync until after the assistant message is emitted', async () => {
