@@ -19,23 +19,22 @@ function getStatusLabel(status) {
     case 'cancelled':
       return '已取消';
     default:
-      return '未知';
+      return '空闲';
   }
 }
 
-function formatEmpty(text) {
-  const item = document.createElement('div');
-  item.className = 'empty';
-  item.textContent = text;
-  return item;
+function createEmpty(text) {
+  const element = document.createElement('div');
+  element.className = 'empty';
+  element.textContent = text;
+  return element;
 }
 
-function createStatusPill(status) {
-  const pill = document.createElement('span');
-  pill.className = 'status-pill';
-  pill.dataset.status = status || 'idle';
-  pill.textContent = getStatusLabel(status);
-  return pill;
+function setText(id, value) {
+  const element = document.getElementById(id);
+  if (element) {
+    element.textContent = value;
+  }
 }
 
 function renderTaskList() {
@@ -46,7 +45,7 @@ function renderTaskList() {
 
   container.innerHTML = '';
   if (!state.tasks.length) {
-    container.appendChild(formatEmpty('当前没有后台任务。'));
+    container.appendChild(createEmpty('当前没有后台任务。'));
     return;
   }
 
@@ -58,20 +57,24 @@ function renderTaskList() {
       item.classList.add('is-active');
     }
 
-    const head = document.createElement('div');
-    head.className = 'task-card-head';
+    const top = document.createElement('div');
+    top.className = 'task-card-top';
 
-    const title = document.createElement('div');
-    title.className = 'task-card-title';
+    const title = document.createElement('strong');
+    title.className = 'task-title';
     title.textContent = task.title;
 
-    head.append(title, createStatusPill(task.status));
+    const status = document.createElement('span');
+    status.className = 'status-pill';
+    status.dataset.status = task.status;
+    status.textContent = getStatusLabel(task.status);
 
-    const copy = document.createElement('div');
-    copy.className = 'task-card-copy';
-    copy.textContent = task.progressSummary || task.resultSummary || '暂无进度摘要。';
+    const summary = document.createElement('p');
+    summary.className = 'task-summary';
+    summary.textContent = task.progressSummary || task.resultSummary || '暂无摘要。';
 
-    item.append(head, copy);
+    top.append(title, status);
+    item.append(top, summary);
     item.addEventListener('click', () => {
       state.selectedTaskId = task.id;
       renderTaskList();
@@ -81,59 +84,43 @@ function renderTaskList() {
   }
 }
 
-function setText(id, value) {
-  const element = document.getElementById(id);
-  if (element) {
-    element.textContent = value;
-  }
-}
-
-function fillList(containerId, values, renderItem) {
+function fillList(containerId, items, renderItem, emptyText) {
   const container = document.getElementById(containerId);
   if (!container) {
     return;
   }
 
   container.innerHTML = '';
-  if (!values.length) {
-    container.appendChild(formatEmpty('暂无内容。'));
+  if (!items.length) {
+    container.appendChild(createEmpty(emptyText));
     return;
   }
 
-  for (const value of values) {
-    container.appendChild(renderItem(value));
+  for (const item of items) {
+    container.appendChild(renderItem(item));
   }
 }
 
 function renderTaskDetail() {
   const task = state.tasks.find((item) => item.id === state.selectedTaskId) || null;
-  const statusElement = document.getElementById('detail-status');
   const actions = document.getElementById('detail-actions');
   const approveButton = document.getElementById('approve-button');
   const cancelButton = document.getElementById('cancel-button');
+  const status = document.getElementById('detail-status');
 
   if (!task) {
     setText('detail-title', '等待任务');
     setText('detail-summary', '当前没有后台任务。');
     setText('detail-result', '任务完成后会在这里显示结果摘要。');
-    setText('detail-mission', '暂无任务目标');
-    setText('detail-context', '暂无压缩上下文');
-    if (statusElement) {
-      statusElement.dataset.status = 'idle';
-      statusElement.textContent = '空闲';
+    if (status) {
+      status.dataset.status = 'idle';
+      status.textContent = '空闲';
     }
-    actions && (actions.style.display = 'none');
-    fillList('detail-notes', [], (note) => {
-      const item = document.createElement('div');
-      item.className = 'stack-item';
-      item.textContent = note;
-      return item;
-    });
-    fillList('detail-skills', [], (capability) => capability);
-    fillList('detail-mcps', [], (capability) => capability);
-    fillList('detail-steps', [], (step) => step);
-    fillList('detail-artifacts', [], (artifact) => artifact);
-    fillList('detail-memory', [], (memory) => memory);
+    if (actions) {
+      actions.style.display = 'none';
+    }
+    fillList('detail-steps', [], (item) => item, '还没有步骤。');
+    fillList('detail-notes', [], (item) => item, '当前没有备注。');
     return;
   }
 
@@ -141,85 +128,42 @@ function renderTaskDetail() {
   setText('detail-title', task.title);
   setText('detail-summary', workspace?.summary || task.progressSummary || '暂无摘要。');
   setText('detail-result', task.resultSummary || workspace?.outcome?.summary || '任务仍在推进中。');
-  setText('detail-mission', workspace?.mission || task.sourceTranscript || '暂无任务目标');
-  setText('detail-context', workspace?.compressedContext || '暂无压缩上下文');
-  if (statusElement) {
-    statusElement.dataset.status = task.status;
-    statusElement.textContent = getStatusLabel(task.status);
+  if (status) {
+    status.dataset.status = task.status;
+    status.textContent = getStatusLabel(task.status);
   }
 
-  fillList('detail-notes', workspace?.notes || [], (note) => {
-    const item = document.createElement('div');
-    item.className = 'stack-item';
-    item.textContent = note;
-    return item;
-  });
+  fillList(
+    'detail-steps',
+    workspace?.steps || [],
+    (step) => {
+      const item = document.createElement('div');
+      item.className = 'stack-item';
 
-  fillList('detail-skills', workspace?.skills || [], (capability) => {
-    const item = document.createElement('div');
-    item.className = 'chip';
-    const label = document.createElement('span');
-    label.className = 'chip-label';
-    label.textContent = capability.label;
-    const reason = document.createElement('span');
-    reason.textContent = capability.reason;
-    item.append(label, reason);
-    return item;
-  });
+      const title = document.createElement('strong');
+      title.textContent = `${step.title} · ${getStatusLabel(step.status)}`;
 
-  fillList('detail-mcps', workspace?.mcps || [], (capability) => {
-    const item = document.createElement('div');
-    item.className = 'chip';
-    const label = document.createElement('span');
-    label.className = 'chip-label';
-    label.textContent = capability.label;
-    const reason = document.createElement('span');
-    reason.textContent = capability.reason;
-    item.append(label, reason);
-    return item;
-  });
+      const summary = document.createElement('p');
+      summary.className = 'stack-copy';
+      summary.textContent = step.summary;
 
-  fillList('detail-steps', workspace?.steps || [], (step) => {
-    const item = document.createElement('div');
-    item.className = 'step-item';
-    const title = document.createElement('div');
-    title.className = 'step-title';
-    title.textContent = `${step.title} · ${step.status}`;
-    const summary = document.createElement('div');
-    summary.className = 'step-summary';
-    summary.textContent = step.summary;
-    item.append(title, summary);
-    return item;
-  });
+      item.append(title, summary);
+      return item;
+    },
+    '还没有步骤。',
+  );
 
-  fillList('detail-artifacts', workspace?.artifacts || [], (artifact) => {
-    const item = document.createElement('div');
-    item.className = 'artifact-item';
-    const label = document.createElement('div');
-    label.className = 'artifact-label';
-    label.textContent = artifact.label;
-    const content = document.createElement('div');
-    content.className = 'artifact-content';
-    content.textContent = artifact.content;
-    item.append(label, content);
-    return item;
-  });
-
-  fillList('detail-memory', workspace?.memoryRefs || [], (memoryRef) => {
-    const item = document.createElement('div');
-    item.className = 'memory-item';
-    const label = document.createElement('div');
-    label.className = 'memory-label';
-    label.textContent = memoryRef.label;
-    const summary = document.createElement('div');
-    summary.className = 'memory-summary';
-    summary.textContent = memoryRef.summary;
-    const pathLabel = document.createElement('div');
-    pathLabel.className = 'memory-path';
-    pathLabel.textContent = memoryRef.path;
-    item.append(label, summary, pathLabel);
-    return item;
-  });
+  fillList(
+    'detail-notes',
+    workspace?.notes || [],
+    (note) => {
+      const item = document.createElement('div');
+      item.className = 'stack-item';
+      item.textContent = note;
+      return item;
+    },
+    '当前没有备注。',
+  );
 
   if (actions) {
     actions.style.display = 'flex';
@@ -247,8 +191,8 @@ function renderSummary(payload) {
   setText(
     'hero-summary',
     payload.latestTask
-      ? `当前最近任务：${payload.latestTask.title}。控制面板与桌宠主界面分离，后台细节只保留在这里。`
-      : '本地控制面板用于查看 agent 工作区、任务执行状态和审批操作。',
+      ? '后台任务细节都放在这里，桌宠主界面只负责陪伴和交互。'
+      : '这是第一版简化控制面板，用来看任务状态和手动确认。',
   );
 }
 
@@ -265,14 +209,14 @@ async function mutateTask(taskId, action) {
 }
 
 async function refreshState() {
-  const response = await fetch('/api/state', {
-    cache: 'no-store',
-  });
+  const response = await fetch('/api/state', { cache: 'no-store' });
   const payload = await response.json();
   state.tasks = Array.isArray(payload.tasks) ? payload.tasks : [];
+
   if (!state.selectedTaskId || !state.tasks.some((task) => task.id === state.selectedTaskId)) {
     state.selectedTaskId = payload.latestTask?.id || state.tasks[0]?.id || null;
   }
+
   renderSummary(payload);
   renderTaskList();
   renderTaskDetail();

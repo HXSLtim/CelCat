@@ -20,9 +20,11 @@ import { PcmAudioPlayer } from './voice/pcmAudioPlayer';
 import type { VoiceUiState } from './voice/voiceUi';
 import type { SessionEvent, SessionSnapshot } from '../types/session';
 import type { UserSettings } from '../types/settings';
-import type { AgentCapabilityCatalogEntry, AgentWorkspaceArtifact, AgentWorkspaceCapability, AgentWorkspaceMemoryRef, AgentWorkspaceStep, TaskRecord } from '../types/tasks';
 import type { WindowStateEvent, WindowStateSnapshot } from '../types/windowState';
 import { safeConsoleLog } from '../shared/debugLogger';
+
+const LONG_PRESS_DRAG_DELAY_MS = 260;
+const LONG_PRESS_DRAG_MOVE_TOLERANCE_PX = 12;
 
 type Live2DManagerInstance = {
   loadModel(): Promise<void>;
@@ -52,15 +54,22 @@ class DesktopCompanion {
   private isFullscreen = false;
   private dragSession: DragSession | null = null;
   private hoveringWindow = false;
-  private activeTask: TaskRecord | null = null;
-  private workspaceTask: TaskRecord | null = null;
   private providerAudioSeen = false;
-  private discoveredCapabilities: AgentCapabilityCatalogEntry[] = [];
   private pendingAssistantStatusText = '';
   private assistantStatusFlushTimer: ReturnType<typeof setTimeout> | null = null;
   private lastAssistantStatusAt = 0;
   private lastAssistantExpression: AssistantExpressionInference | null = null;
   private lastAssistantExpressionAt = 0;
+  private pendingLongPressDrag:
+    | {
+        pointerId: number;
+        startX: number;
+        startY: number;
+        screenX: number;
+        screenY: number;
+        timer: ReturnType<typeof setTimeout>;
+      }
+    | null = null;
 
   constructor() {
     void this.init();
@@ -119,31 +128,57 @@ class DesktopCompanion {
   }
 
   private setupWindowChrome(): void {
-    const dragButton = document.getElementById('drag-button');
+    const appRoot = document.getElementById('app');
     const menuButton = document.getElementById('menu-button') as HTMLButtonElement | null;
     const menu = document.getElementById('window-menu');
     const menuActions = document.getElementById('window-menu-actions');
     const autoExecuteToggle = document.getElementById('auto-execute-toggle') as HTMLInputElement | null;
 
-    if (!dragButton || !menuButton || !menu || !menuActions) {
+    if (!appRoot || !menuButton || !menu || !menuActions) {
       return;
     }
 
     this.renderWindowMenuItems();
 
-    dragButton.addEventListener('pointerdown', async (event) => {
-      event.preventDefault();
-      event.stopPropagation();
+    appRoot.addEventListener('pointerdown', (event) => {
+      const target = event.target as HTMLElement | null;
+      if (event.button !== 0 || !target) {
+        return;
+      }
 
-      const [windowX, windowY] = await window.electronAPI.windowDrag.getPosition();
-      this.dragSession = createDragSession(
-        { x: windowX, y: windowY },
-        { x: event.screenX, y: event.screenY },
-      );
-      dragButton.classList.add('dragging');
+      if (target.closest('#window-menu, #menu-button, button, input, label, a')) {
+        return;
+      }
+
+      this.cancelPendingLongPressDrag();
+      this.pendingLongPressDrag = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        screenX: event.screenX,
+        screenY: event.screenY,
+        timer: setTimeout(() => {
+          void this.beginLongPressDrag();
+        }, LONG_PRESS_DRAG_DELAY_MS),
+      };
     });
 
     window.addEventListener('pointermove', (event) => {
+      if (
+        this.pendingLongPressDrag
+        && event.pointerId === this.pendingLongPressDrag.pointerId
+        && !this.dragSession
+      ) {
+        const deltaX = event.clientX - this.pendingLongPressDrag.startX;
+        const deltaY = event.clientY - this.pendingLongPressDrag.startY;
+        if (Math.hypot(deltaX, deltaY) > LONG_PRESS_DRAG_MOVE_TOLERANCE_PX) {
+          this.cancelPendingLongPressDrag();
+        } else {
+          this.pendingLongPressDrag.screenX = event.screenX;
+          this.pendingLongPressDrag.screenY = event.screenY;
+        }
+      }
+
       if (!this.dragSession) {
         return;
       }
@@ -159,8 +194,8 @@ class DesktopCompanion {
     });
 
     const stopDragging = () => {
+      this.cancelPendingLongPressDrag();
       this.dragSession = null;
-      dragButton.classList.remove('dragging');
     };
 
     window.addEventListener('pointerup', stopDragging);
@@ -204,6 +239,29 @@ class DesktopCompanion {
     });
 
     this.syncWindowChrome();
+  }
+
+  private async beginLongPressDrag(): Promise<void> {
+    if (!this.pendingLongPressDrag || this.dragSession) {
+      return;
+    }
+
+    const pending = this.pendingLongPressDrag;
+    this.pendingLongPressDrag = null;
+    const [windowX, windowY] = await window.electronAPI.windowDrag.getPosition();
+    this.dragSession = createDragSession(
+      { x: windowX, y: windowY },
+      { x: pending.screenX, y: pending.screenY },
+    );
+  }
+
+  private cancelPendingLongPressDrag(): void {
+    if (!this.pendingLongPressDrag) {
+      return;
+    }
+
+    clearTimeout(this.pendingLongPressDrag.timer);
+    this.pendingLongPressDrag = null;
   }
 
   private async bootstrapWindowState(): Promise<void> {
@@ -268,9 +326,7 @@ class DesktopCompanion {
     let sessionSnapshot: SessionSnapshot;
 
     try {
-      [sessionSnapshot] = await Promise.all([
-        window.electronAPI.session.start(),
-      ]);
+      sessionSnapshot = await window.electronAPI.session.start();
     } catch (error: any) {
       console.error('Session failed to start:', error);
       sessionSnapshot = {
@@ -284,23 +340,13 @@ class DesktopCompanion {
       this.syncSessionSnapshot(sessionSnapshot);
     }
 
-    const [tasks, discoveredCapabilities, settings] = await Promise.all([
-      window.electronAPI.tasks.list(),
-      window.electronAPI.agentCapabilities.list(),
-      window.electronAPI.settings.get(),
-    ]);
+    const settings = await window.electronAPI.settings.get();
 
     this.syncSessionSnapshot(sessionSnapshot);
-    this.syncTaskList(tasks);
-    this.discoveredCapabilities = discoveredCapabilities;
     this.syncAutoExecuteSettings(settings);
-    this.syncWorkspace(this.workspaceTask);
 
     window.electronAPI.session.onEvent((event) => {
       this.handleSessionEvent(event);
-    });
-    window.electronAPI.tasks.onUpdate((task) => {
-      this.handleTaskUpdate(task);
     });
   }
 
@@ -337,17 +383,6 @@ class DesktopCompanion {
       this.clearPendingAssistantStatus();
       this.syncPrimaryStatus(event.message, 'error');
     }
-  }
-
-  private handleTaskUpdate(task: TaskRecord): void {
-    const activeTask = task.status === 'completed' || task.status === 'cancelled' || task.status === 'failed'
-      ? null
-      : task;
-
-    this.activeTask = activeTask ?? (this.activeTask?.id === task.id ? null : this.activeTask);
-    this.workspaceTask = task;
-    this.syncTaskStatus(task);
-    this.syncWorkspace(task);
   }
 
   private syncSessionSnapshot(snapshot: SessionSnapshot): void {
@@ -452,442 +487,6 @@ class DesktopCompanion {
     assistantStatus.textContent = text;
     assistantStatus.dataset.tone = tone;
     assistantStatus.classList.toggle('is-visible', visible);
-  }
-
-  private syncTaskList(tasks: TaskRecord[]): void {
-    const latestTask = tasks.find((task) => task.status === 'queued' || task.status === 'running' || task.status === 'waiting_user')
-      ?? tasks[0]
-      ?? null;
-
-    if (latestTask) {
-      this.activeTask = latestTask;
-      this.workspaceTask = latestTask;
-      this.syncTaskStatus(latestTask);
-      this.syncWorkspace(latestTask);
-      return;
-    }
-
-    this.workspaceTask = null;
-    this.syncWorkspace(null);
-  }
-
-  private syncTaskStatus(task: TaskRecord | null): void {
-    const taskStatus = document.getElementById('task-status');
-    if (!taskStatus) {
-      return;
-    }
-
-    if (!task) {
-      taskStatus.textContent = '';
-      taskStatus.classList.remove('is-visible');
-      delete taskStatus.dataset.tone;
-      return;
-    }
-
-    taskStatus.textContent = `${task.title}：${task.progressSummary}`;
-    taskStatus.dataset.tone = task.status === 'completed'
-      ? 'completed'
-      : task.status === 'failed'
-        ? 'error'
-        : task.status === 'cancelled'
-          ? 'idle'
-          : 'running';
-    taskStatus.classList.add('is-visible');
-  }
-
-  private syncWorkspace(task: TaskRecord | null): void {
-    const workspacePanel = document.getElementById('workspace-panel');
-    const workspaceTitle = document.getElementById('workspace-title');
-    const workspaceModeBadge = document.getElementById('workspace-mode-badge');
-    const workspaceSummary = document.getElementById('workspace-summary');
-    const workspaceMission = document.getElementById('workspace-mission');
-    const workspaceSkills = document.getElementById('workspace-skills');
-    const workspaceMcps = document.getElementById('workspace-mcps');
-    const workspaceCapabilityCatalog = document.getElementById('workspace-capability-catalog');
-    const workspaceSteps = document.getElementById('workspace-steps');
-    const workspaceArtifacts = document.getElementById('workspace-artifacts');
-    const workspaceContext = document.getElementById('workspace-context');
-    const workspaceMemory = document.getElementById('workspace-memory');
-    const workspaceNotes = document.getElementById('workspace-notes');
-    const workspaceResult = document.getElementById('workspace-result');
-    const workspaceActions = document.getElementById('workspace-actions');
-    const workspaceApproveButton = document.getElementById('workspace-approve-button') as HTMLButtonElement | null;
-
-    if (
-      !workspacePanel
-      || !workspaceTitle
-      || !workspaceModeBadge
-      || !workspaceSummary
-      || !workspaceMission
-      || !workspaceSkills
-      || !workspaceMcps
-      || !workspaceCapabilityCatalog
-      || !workspaceSteps
-      || !workspaceArtifacts
-      || !workspaceContext
-      || !workspaceMemory
-      || !workspaceNotes
-      || !workspaceResult
-      || !workspaceActions
-    ) {
-      return;
-    }
-
-    if (!task?.workspace) {
-      workspacePanel.classList.remove('is-visible');
-      workspaceTitle.textContent = '等待任务';
-      workspaceModeBadge.textContent = '空闲';
-      workspaceSummary.textContent = '当你交给我一个后台任务时，这里会显示 agent 的执行工作区、步骤、技能和 MCP 能力。';
-      workspaceMission.textContent = '暂无任务目标';
-      workspaceResult.textContent = '任务完成后，这里会显示整理好的结果摘要。';
-      this.renderWorkspaceCapabilities(workspaceSkills, []);
-      this.renderWorkspaceCapabilities(workspaceMcps, []);
-      this.renderCapabilityCatalog(workspaceCapabilityCatalog, this.discoveredCapabilities);
-      this.renderWorkspaceSteps(workspaceSteps, []);
-      this.renderWorkspaceArtifacts(workspaceArtifacts, []);
-      workspaceContext.textContent = '任务执行过程中，这里会生成压缩上下文。';
-      this.renderWorkspaceMemory(workspaceMemory, []);
-      this.renderWorkspaceNotes(workspaceNotes, []);
-      workspaceActions.classList.remove('is-visible');
-      return;
-    }
-
-    workspacePanel.classList.add('is-visible');
-    workspaceTitle.textContent = task.title;
-    workspaceModeBadge.textContent = this.getWorkspaceModeLabel(task);
-    workspaceSummary.textContent = task.workspace.summary;
-    workspaceMission.textContent = task.workspace.mission;
-    workspaceResult.textContent = this.formatWorkspaceResult(task);
-    this.renderWorkspaceCapabilities(workspaceSkills, task.workspace.skills);
-    this.renderWorkspaceCapabilities(workspaceMcps, task.workspace.mcps);
-    this.renderCapabilityCatalog(workspaceCapabilityCatalog, this.discoveredCapabilities, task.workspace);
-    this.renderWorkspaceSteps(workspaceSteps, task.workspace.steps, task.workspace);
-    this.renderWorkspaceArtifacts(workspaceArtifacts, task.workspace.artifacts);
-    workspaceContext.textContent = task.workspace.compressedContext || '当前还没有生成压缩上下文。';
-    this.renderWorkspaceMemory(workspaceMemory, task.workspace.memoryRefs);
-    this.renderWorkspaceNotes(workspaceNotes, task.workspace.notes);
-
-    const shouldShowApprove = task.status === 'waiting_user';
-    workspaceActions.classList.toggle('is-visible', shouldShowApprove);
-    if (workspaceApproveButton) {
-      workspaceApproveButton.disabled = !shouldShowApprove;
-      workspaceApproveButton.onclick = shouldShowApprove
-        ? async () => {
-          workspaceApproveButton.disabled = true;
-          await window.electronAPI.tasks.approve(task.id);
-        }
-        : null;
-    }
-  }
-
-  private renderWorkspaceCapabilities(
-    container: HTMLElement,
-    capabilities: AgentWorkspaceCapability[],
-  ): void {
-    container.innerHTML = '';
-    if (!capabilities.length) {
-      container.appendChild(this.createWorkspaceEmpty('当前没有选中的能力。'));
-      return;
-    }
-
-    for (const capability of capabilities) {
-      const item = document.createElement('div');
-      item.className = 'workspace-chip';
-      if (capability.source) {
-        item.dataset.source = capability.source;
-      }
-
-      const label = document.createElement('span');
-      label.className = 'workspace-chip-label';
-      label.textContent = capability.label;
-
-      const reason = document.createElement('span');
-      reason.className = 'workspace-chip-reason';
-      reason.textContent = capability.reason;
-
-      if (capability.source) {
-        const meta = document.createElement('span');
-        meta.className = 'workspace-chip-meta';
-        meta.textContent = this.getCapabilitySourceLabel(capability.source);
-        item.append(label, meta, reason);
-      } else {
-        item.append(label, reason);
-      }
-      container.appendChild(item);
-    }
-  }
-
-  private renderCapabilityCatalog(
-    container: HTMLElement,
-    capabilities: AgentCapabilityCatalogEntry[],
-    workspace?: TaskRecord['workspace'],
-  ): void {
-    container.innerHTML = '';
-    if (!capabilities.length) {
-      container.appendChild(this.createWorkspaceEmpty('当前还没有发现可用的 skill 或 MCP。'));
-      return;
-    }
-
-    const prioritized = [...capabilities].sort((left, right) => {
-      const leftSelected = this.isCapabilitySelected(workspace, left.id) ? 1 : 0;
-      const rightSelected = this.isCapabilitySelected(workspace, right.id) ? 1 : 0;
-      if (leftSelected !== rightSelected) {
-        return rightSelected - leftSelected;
-      }
-      return left.label.localeCompare(right.label);
-    }).slice(0, 8);
-
-    for (const capability of prioritized) {
-      const item = document.createElement('div');
-      item.className = 'workspace-chip';
-      item.dataset.source = capability.source;
-
-      const label = document.createElement('span');
-      label.className = 'workspace-chip-label';
-      label.textContent = capability.label;
-
-      const meta = document.createElement('span');
-      meta.className = 'workspace-chip-meta';
-      meta.textContent = this.isCapabilitySelected(workspace, capability.id)
-        ? `已选中 · ${this.getCapabilitySourceLabel(capability.source)}`
-        : this.getCapabilitySourceLabel(capability.source);
-
-      const reason = document.createElement('span');
-      reason.className = 'workspace-chip-reason';
-      reason.textContent = capability.description || capability.defaultReason;
-
-      item.append(label, meta, reason);
-      container.appendChild(item);
-    }
-  }
-
-  private renderWorkspaceSteps(
-    container: HTMLElement,
-    steps: AgentWorkspaceStep[],
-    workspace?: TaskRecord['workspace'],
-  ): void {
-    container.innerHTML = '';
-    if (!steps.length) {
-      container.appendChild(this.createWorkspaceEmpty('计划生成后，这里会出现步骤列表。'));
-      return;
-    }
-
-    for (const step of steps) {
-      const item = document.createElement('div');
-      item.className = 'workspace-step';
-      item.dataset.status = step.status;
-
-      const head = document.createElement('div');
-      head.className = 'workspace-step-head';
-
-      const title = document.createElement('span');
-      title.className = 'workspace-step-title';
-      title.textContent = step.title;
-
-      const status = document.createElement('span');
-      status.className = 'workspace-step-status';
-      status.textContent = this.getWorkspaceStepStatusLabel(step.status);
-
-      head.append(title, status);
-
-      const summary = document.createElement('div');
-      summary.className = 'workspace-step-summary';
-      summary.textContent = step.summary;
-
-      item.append(head, summary);
-
-      if (step.capabilityId) {
-        const capability = document.createElement('div');
-        capability.className = 'workspace-step-capability';
-        const capabilityLabel = this.getWorkspaceCapabilityLabel(workspace, step.capabilityId, step.capabilityType);
-        capability.textContent = `${step.capabilityType === 'mcp' ? 'MCP' : 'Skill'}: ${capabilityLabel}`;
-        item.appendChild(capability);
-      }
-
-      container.appendChild(item);
-    }
-  }
-
-  private getWorkspaceCapabilityLabel(
-    workspace: TaskRecord['workspace'] | undefined,
-    capabilityId: string,
-    capabilityType?: AgentWorkspaceStep['capabilityType'],
-  ): string {
-    if (!workspace) {
-      return capabilityId;
-    }
-
-    const candidates = capabilityType === 'mcp'
-      ? workspace.mcps
-      : capabilityType === 'skill'
-        ? workspace.skills
-        : [...workspace.skills, ...workspace.mcps];
-
-    return candidates.find((capability) => capability.id === capabilityId)?.label || capabilityId;
-  }
-
-  private isCapabilitySelected(
-    workspace: TaskRecord['workspace'] | undefined,
-    capabilityId: string,
-  ): boolean {
-    if (!workspace) {
-      return false;
-    }
-
-    return [...workspace.skills, ...workspace.mcps].some((capability) => capability.id === capabilityId);
-  }
-
-  private getCapabilitySourceLabel(source: AgentCapabilityCatalogEntry['source']): string {
-    if (source === 'skill') {
-      return 'Skill';
-    }
-    if (source === 'mcp') {
-      return 'External MCP';
-    }
-    return 'Builtin';
-  }
-
-  private renderWorkspaceNotes(
-    container: HTMLElement,
-    notes: string[],
-  ): void {
-    container.innerHTML = '';
-    if (!notes.length) {
-      container.appendChild(this.createWorkspaceEmpty('当前没有额外备注。'));
-      return;
-    }
-
-    for (const note of notes) {
-      const item = document.createElement('div');
-      item.className = 'workspace-note';
-      item.textContent = note;
-      container.appendChild(item);
-    }
-  }
-
-  private formatWorkspaceResult(task: TaskRecord): string {
-    if (task.resultSummary) {
-      return task.resultSummary;
-    }
-
-    const outcome = task.workspace?.outcome;
-    if (!outcome) {
-      return '任务仍在推进中，完成后会在这里沉淀结果。';
-    }
-
-    const lines = [
-      outcome.summary,
-      outcome.blockers.length ? `阻塞：${outcome.blockers.join('；')}` : '',
-      outcome.nextActions.length ? `下一步：${outcome.nextActions.join('；')}` : '',
-    ].filter(Boolean);
-
-    return lines.join('\n');
-  }
-
-  private renderWorkspaceArtifacts(
-    container: HTMLElement,
-    artifacts: AgentWorkspaceArtifact[],
-  ): void {
-    container.innerHTML = '';
-    if (!artifacts.length) {
-      container.appendChild(this.createWorkspaceEmpty('能力执行后，这里会展示工作区产物和命令输出。'));
-      return;
-    }
-
-    for (const artifact of artifacts) {
-      const item = document.createElement('div');
-      item.className = 'workspace-artifact';
-      item.dataset.tone = artifact.tone;
-
-      const label = document.createElement('div');
-      label.className = 'workspace-artifact-label';
-      label.textContent = artifact.label;
-
-      const content = document.createElement('div');
-      content.className = 'workspace-artifact-content';
-      content.textContent = artifact.content;
-
-      item.append(label, content);
-      container.appendChild(item);
-    }
-  }
-
-  private renderWorkspaceMemory(
-    container: HTMLElement,
-    memoryRefs: AgentWorkspaceMemoryRef[],
-  ): void {
-    container.innerHTML = '';
-    if (!memoryRefs.length) {
-      container.appendChild(this.createWorkspaceEmpty('完成任务后，这里会记录长期记忆和任务记忆文档。'));
-      return;
-    }
-
-    for (const memoryRef of memoryRefs) {
-      const item = document.createElement('div');
-      item.className = 'workspace-memory-item';
-
-      const label = document.createElement('div');
-      label.className = 'workspace-memory-label';
-      label.textContent = memoryRef.label;
-
-      const summary = document.createElement('div');
-      summary.className = 'workspace-memory-summary';
-      summary.textContent = memoryRef.summary;
-
-      const location = document.createElement('div');
-      location.className = 'workspace-memory-path';
-      location.textContent = memoryRef.path;
-
-      item.append(label, summary, location);
-      container.appendChild(item);
-    }
-  }
-
-  private createWorkspaceEmpty(text: string): HTMLElement {
-    const item = document.createElement('div');
-    item.className = 'workspace-empty';
-    item.textContent = text;
-    return item;
-  }
-
-  private getWorkspaceModeLabel(task: TaskRecord): string {
-    if (task.status === 'waiting_user') {
-      return '等待确认';
-    }
-
-    if (task.status === 'completed') {
-      return '已完成';
-    }
-
-    if (task.status === 'failed') {
-      return '失败';
-    }
-
-    if (task.status === 'cancelled') {
-      return '已取消';
-    }
-
-    return task.workspace?.mode === 'planning'
-      ? '规划中'
-      : task.workspace?.mode === 'executing'
-        ? '执行中'
-        : '运行中';
-  }
-
-  private getWorkspaceStepStatusLabel(status: AgentWorkspaceStep['status']): string {
-    if (status === 'in_progress') {
-      return '运行中';
-    }
-
-    if (status === 'completed') {
-      return '完成';
-    }
-
-    if (status === 'blocked') {
-      return '阻塞';
-    }
-
-    return '待执行';
   }
 
   private syncAutoExecuteSettings(settings: UserSettings): void {

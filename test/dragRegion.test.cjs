@@ -3,15 +3,10 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-test('renderer shell includes visible drag and menu buttons', () => {
+test('renderer shell exposes menu chrome and relies on direct long-press dragging', () => {
   const htmlPath = path.join(__dirname, '..', 'src', 'renderer', 'index.html');
   const html = fs.readFileSync(htmlPath, 'utf8');
 
-  assert.match(
-    html,
-    /id="drag-button"/,
-    'index.html should include a visible drag button so the frameless window can be moved',
-  );
   assert.match(
     html,
     /id="menu-button"/,
@@ -24,8 +19,8 @@ test('renderer shell includes visible drag and menu buttons', () => {
   );
   assert.match(
     html,
-    /class="[^"]*drag-icon[^"]*"/,
-    'drag button should use an icon container',
+    /id="live2d-canvas"/,
+    'pet window should keep the Live2D canvas as the main interaction surface',
   );
   assert.match(
     html,
@@ -34,12 +29,12 @@ test('renderer shell includes visible drag and menu buttons', () => {
   );
   assert.doesNotMatch(
     html,
-    /class="drag-label"/,
-    'drag button should no longer render a persistent text label',
+    /id="drag-button"/,
+    'pet window should no longer render a dedicated drag button',
   );
 });
 
-test('styles keep the drag button interactive and menu clickable', () => {
+test('styles keep the menu clickable without a dedicated drag button', () => {
   const cssPath = path.join(__dirname, '..', 'src', 'renderer', 'styles', 'main.css');
   const css = fs.readFileSync(cssPath, 'utf8');
 
@@ -60,16 +55,6 @@ test('styles keep the drag button interactive and menu clickable', () => {
   );
   assert.match(
     css,
-    /#drag-button[\s\S]*cursor:\s*grab/,
-    'drag button should advertise a draggable cursor',
-  );
-  assert.match(
-    css,
-    /#drag-button[\s\S]*width:\s*40px/,
-    'drag button should use a smaller footprint',
-  );
-  assert.match(
-    css,
     /#menu-button[\s\S]*width:\s*40px/,
     'menu button should use a smaller footprint',
   );
@@ -82,5 +67,10 @@ test('styles keep the drag button interactive and menu clickable', () => {
     css,
     /#window-menu[\s\S]*-webkit-app-region:\s*no-drag/,
     'menu panel must stay clickable',
+  );
+  assert.doesNotMatch(
+    css,
+    /#drag-button/,
+    'renderer styles should no longer define a dedicated drag button',
   );
 });

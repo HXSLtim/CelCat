@@ -19,4 +19,6 @@ test('styles keep the unified conversation status panel reactive without task ch
 
   assert.match(css, /#assistant-status[\s\S]*opacity:\s*0/, 'conversation status panel should stay hidden until needed');
   assert.match(css, /#assistant-status\.is-visible[\s\S]*opacity:\s*1/, 'conversation status panel should reveal itself when feedback exists');
+  assert.doesNotMatch(css, /#task-status/, 'pet window styles should not carry a background task status pill');
+  assert.doesNotMatch(css, /#workspace-panel/, 'pet window styles should not carry the old workspace panel');
 });
