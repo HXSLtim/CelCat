@@ -786,7 +786,7 @@ test('SessionManager drops malformed compatibility directive fragments when the 
   await new Promise((resolve) => setTimeout(resolve, 0));
 });
 
-test('SessionManager still applies a late realtime routing takeover after provider output was released', async () => {
+test('SessionManager ignores a late realtime routing takeover after provider output was released', async () => {
   const emittedEvents = [];
   let eventSink = null;
   let resolveRoutingDecision = null;
@@ -864,9 +864,9 @@ test('SessionManager still applies a late realtime routing takeover after provid
   );
   assert.equal(
     emittedEvents.some((event) => event.type === 'assistant-message' && event.text === '好的，我已经把这件事交给后台 agent 处理了。'),
-    true,
+    false,
   );
-  assert.equal(sessionManager.getSnapshot().activeTaskId, 'task-late');
+  assert.equal(sessionManager.getSnapshot().activeTaskId, null);
 });
 
 test('SessionManager discards buffered realtime provider output when a new transcript supersedes the turn', async () => {

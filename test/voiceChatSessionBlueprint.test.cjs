@@ -176,3 +176,36 @@ test('buildVoiceChatSessionBlueprint excludes task mission summaries from prompt
   assert.equal(blueprint.nativeSessionConfig.systemMessages.some((item) => /Mission:|当前后台任务：/.test(item)), false);
   assert.match(blueprint.nativeSessionConfig.activeTaskSummary, /后台工具任务/);
 });
+
+test('buildVoiceChatSessionBlueprint excludes unsafe long-term memory and active task from compatibility prompt context', () => {
+  const blueprint = buildVoiceChatSessionBlueprint({
+    companionIdentity: {
+      displayName: '豆包',
+      identityNotes: ['你会延续和用户之间的熟悉感。'],
+      updatedAt: new Date().toISOString(),
+    },
+    memoryContext: {
+      stablePreferences: ['偏好中文、直接执行。'],
+      recentMemories: [],
+      relevantMemories: [],
+      longTermMemories: [{
+        category: 'patterns',
+        title: '后台工具任务',
+        summary: 'Mission: 帮我打开一下浏览器。 Completed: 打开站点。',
+        evidence: '压缩上下文',
+        updatedAt: new Date().toISOString(),
+      }],
+      capabilitySignals: [],
+    },
+    latestTask: {
+      id: 'task-1',
+      title: '后台工具任务',
+      progressSummary: '正在打开浏览器。',
+    },
+  });
+
+  const block = buildVoiceChatCompatibilityContextBlock(blueprint);
+
+  assert.equal(blueprint.memory.longTermMemories.length, 0);
+  assert.doesNotMatch(block, /Mission:|当前后台任务：/);
+});

@@ -405,25 +405,10 @@ export class SessionManager {
     const conversation = await this.dependencies.orchestrator.handleRealtimeProviderTranscript?.(transcript);
     if (!this.pendingProviderTurn || this.pendingProviderTurn.id !== turnId) {
       const completedDisposition = this.completedRealtimeTurnDispositions.get(turnId);
-      if (
-        conversation
-        && this.pendingProviderTurnId === turnId
-        && completedDisposition !== 'provider-tool-call'
-        && completedDisposition !== 'superseded'
-      ) {
-        logDebug('session', 'Applying late local routing decision after provider turn was already released', {
+      if (conversation && completedDisposition) {
+        logDebug('session', 'Ignoring late local routing decision because the realtime turn was already finalized', {
           transcript: truncateDebugText(transcript, 200),
-          hasRelatedTask: Boolean(conversation.relatedTask),
-          eventCount: conversation.events.length,
-        });
-        this.applyRealtimeConversationTakeover(transcript, conversation);
-        this.completedRealtimeTurnDispositions.delete(turnId);
-        return;
-      }
-
-      if (conversation && completedDisposition === 'provider-tool-call') {
-        logDebug('session', 'Ignoring late local routing decision because the provider tool call already finalized the turn', {
-          transcript: truncateDebugText(transcript, 200),
+          disposition: completedDisposition,
           hasRelatedTask: Boolean(conversation.relatedTask),
           eventCount: conversation.events.length,
         });

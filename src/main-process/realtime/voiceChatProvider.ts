@@ -20,7 +20,9 @@ import { VolcengineVoiceChatTransportClient } from './voiceChatTransportClient';
 
 export class VolcengineVoiceChatProviderClient implements CompanionProvider {
   private eventSink: Parameters<CompanionProvider['setEventSink']>[0] = null;
-  private suppressCompatibilityToolMessage = false;
+  private pendingCompatibilityDirective: {
+    startedAt: number;
+  } | null = null;
 
   constructor(
     private readonly fallbackProvider: CompanionProvider = new VolcengineVoiceChatTransportClient(),
@@ -146,22 +148,30 @@ export class VolcengineVoiceChatProviderClient implements CompanionProvider {
       return;
     }
 
-    if (event.type === 'transcript' || event.type === 'error') {
-      this.suppressCompatibilityToolMessage = false;
+    if (event.type === 'transcript') {
+      this.pendingCompatibilityDirective = null;
+      this.eventSink(event);
+      return;
+    }
+
+    if (event.type === 'error') {
+      this.pendingCompatibilityDirective = null;
     }
 
     if (event.type === 'assistant-message' && this.toolExecutor) {
       const normalizedText = event.text.trim();
       const looksLikeDirective = looksLikeVoiceChatToolDirectiveFragment(normalizedText);
       if (looksLikeDirective) {
-        this.suppressCompatibilityToolMessage = true;
+        this.pendingCompatibilityDirective = {
+          startedAt: Date.now(),
+        };
       }
 
-      if (this.suppressCompatibilityToolMessage) {
+      if (this.hasPendingCompatibilityDirective()) {
         const toolCall = parseVoiceChatToolCall(normalizedText);
         if (toolCall) {
           if (event.isFinal !== false) {
-            this.suppressCompatibilityToolMessage = false;
+            this.pendingCompatibilityDirective = null;
             this.eventSink({
               type: 'tool-call',
               toolName: toolCall.name,
@@ -173,7 +183,7 @@ export class VolcengineVoiceChatProviderClient implements CompanionProvider {
         }
 
         if (event.isFinal !== false) {
-          this.suppressCompatibilityToolMessage = false;
+          this.pendingCompatibilityDirective = null;
           if (looksLikeDirective) {
             logDebug('provider', 'Dropped malformed compatibility tool fragment from provider stream', {
               text: normalizedText.slice(0, 200),
@@ -190,6 +200,19 @@ export class VolcengineVoiceChatProviderClient implements CompanionProvider {
     }
 
     this.eventSink(event);
+  }
+
+  private hasPendingCompatibilityDirective(): boolean {
+    if (!this.pendingCompatibilityDirective) {
+      return false;
+    }
+
+    if (Date.now() - this.pendingCompatibilityDirective.startedAt > 5000) {
+      this.pendingCompatibilityDirective = null;
+      return false;
+    }
+
+    return true;
   }
 }
 

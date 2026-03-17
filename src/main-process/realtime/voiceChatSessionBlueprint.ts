@@ -74,6 +74,10 @@ export function buildVoiceChatSessionBlueprint(input: {
     .filter((memory) => isPromptSafeMemorySummary(memory.summary))
     .slice(0, 3)
     .map((memory) => memory.summary);
+  const safeLongTermMemorySummaries = (memoryContext?.longTermMemories || [])
+    .filter((memory) => isPromptSafeMemorySummary(memory.summary))
+    .slice(0, 3)
+    .map((memory) => memory.summary);
   const mcpServers = getAgentCapabilityCatalogEntries({
     env: input.env,
     cwd: input.cwd,
@@ -98,7 +102,7 @@ export function buildVoiceChatSessionBlueprint(input: {
     memory: {
       stablePreferences: memoryContext?.stablePreferences.slice(0, 4) || [],
       relevantMemories: relevantMemorySummaries,
-      longTermMemories: memoryContext?.longTermMemories.slice(0, 3).map((memory) => memory.summary) || [],
+      longTermMemories: safeLongTermMemorySummaries,
     },
     capabilities: {
       tools,
@@ -113,7 +117,7 @@ export function buildVoiceChatSessionBlueprint(input: {
       }),
       stablePreferences: memoryContext?.stablePreferences.slice(0, 4) || [],
       relevantMemories: relevantMemorySummaries,
-      longTermMemories: memoryContext?.longTermMemories.slice(0, 3).map((memory) => memory.summary) || [],
+      longTermMemories: safeLongTermMemorySummaries,
       tools,
       mcpServers,
       latestTask: input.latestTask ?? null,
@@ -146,9 +150,6 @@ export function buildVoiceChatCompatibilityContextBlock(blueprint: VoiceChatSess
       : '',
     blueprint.memory.longTermMemories.length
       ? `长期记忆：${blueprint.memory.longTermMemories.join('；')}`
-      : '',
-    blueprint.activeTask
-      ? `当前后台任务：${blueprint.activeTask.title}，进度：${blueprint.activeTask.progressSummary}`
       : '',
     `已注册工具：${toolSummary}`,
     `可用 MCP：${mcpSummary}`,

@@ -388,3 +388,60 @@ test('VolcengineVoiceChatProviderClient resumes forwarding assistant text after 
     },
   ]);
 });
+
+test('VolcengineVoiceChatProviderClient clears compatibility fragment suppression when a new transcript starts', async () => {
+  const forwardedEvents = [];
+  let baseSink = null;
+  const provider = new VolcengineVoiceChatProviderClient(
+    {
+      async connect() {},
+      async disconnect() {},
+      async startSession() {},
+      async generateReply() {
+        return null;
+      },
+      async appendInputAudioFrame() {},
+      async commitInputAudio() {},
+      isEnabled() {
+        return true;
+      },
+      setEventSink(listener) {
+        baseSink = listener;
+      },
+      async syncCompanionIdentity() {},
+    },
+    new VoiceChatToolExecutor({
+      startAgentTaskFromSystem() {
+        return null;
+      },
+      renameCompanionFromSystem() {
+        return null;
+      },
+      getCompanionIdentity() {
+        return {
+          displayName: 'CelCat',
+        };
+      },
+    }),
+  );
+
+  provider.setEventSink((event) => {
+    forwardedEvents.push(event);
+  });
+
+  baseSink({ type: 'assistant-message', text: 'CELCATOLname=openbrowser', isFinal: false });
+  baseSink({ type: 'transcript', text: '你是谁？' });
+  baseSink({ type: 'assistant-message', text: '我是豆包呀。', isFinal: true });
+
+  assert.deepEqual(forwardedEvents, [
+    {
+      type: 'transcript',
+      text: '你是谁？',
+    },
+    {
+      type: 'assistant-message',
+      text: '我是豆包呀。',
+      isFinal: true,
+    },
+  ]);
+});
