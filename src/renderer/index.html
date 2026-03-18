@@ -11,30 +11,6 @@
 </head>
 <body>
   <div id="app">
-    <div id="window-chrome">
-      <div id="chrome-actions">
-        <button id="menu-button" type="button" aria-label="打开窗口菜单" aria-expanded="false">
-          <span class="menu-lines">
-            <span></span>
-            <span></span>
-            <span></span>
-          </span>
-        </button>
-        <div id="window-menu" class="hidden" role="menu" aria-hidden="true">
-          <div id="auto-execute-panel">
-            <div class="panel-copy">
-              <span class="panel-title">自动执行</span>
-              <p id="auto-execute-hint">当前会先确认中高风险任务。</p>
-            </div>
-            <label class="toggle" for="auto-execute-toggle">
-              <input id="auto-execute-toggle" type="checkbox" />
-              <span class="toggle-track" aria-hidden="true"></span>
-            </label>
-          </div>
-          <div id="window-menu-actions"></div>
-        </div>
-      </div>
-    </div>
     <div id="assistant-status" aria-live="polite" aria-atomic="true"></div>
     <canvas id="live2d-canvas"></canvas>
   </div>

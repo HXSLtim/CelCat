@@ -248,3 +248,27 @@ test('AgentMemoryStore replaces old companion identity notes when a new note set
   assert.equal(profile.identityNotes.some((note) => /小影/.test(note)), false);
   assert.equal(profile.identityNotes.some((note) => /豆包/.test(note)), true);
 });
+
+test('AgentMemoryStore drops stale rename notes that no longer match the current display name', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'celcat-memory-'));
+  const store = new AgentMemoryStore(tempDir);
+  const identityPath = path.join(tempDir, 'agentMemory', 'companionIdentity.json');
+
+  fs.mkdirSync(path.dirname(identityPath), { recursive: true });
+  fs.writeFileSync(identityPath, JSON.stringify({
+    displayName: '豆包',
+    identityNotes: [
+      '你是一个自然陪伴型的中文桌宠 companion。',
+      '用户最近把你的名字改成了小影吧。',
+      '之后和用户聊天时，自然地以豆包的身份陪伴对方。',
+    ],
+    updatedAt: new Date().toISOString(),
+  }, null, 2));
+
+  const profile = store.getCompanionIdentity();
+  const persisted = JSON.parse(fs.readFileSync(identityPath, 'utf8'));
+
+  assert.equal(profile.identityNotes.some((note) => /小影/.test(note)), false);
+  assert.equal(profile.identityNotes.some((note) => /豆包/.test(note)), true);
+  assert.equal(persisted.identityNotes.some((note) => /小影/.test(note)), false);
+});

@@ -165,17 +165,27 @@ export class AgentMemoryStore {
       const displayName = typeof parsed.displayName === 'string' && parsed.displayName.trim()
         ? parsed.displayName.trim()
         : DEFAULT_COMPANION_IDENTITY.displayName;
-      const identityNotes = Array.isArray(parsed.identityNotes)
+      const parsedIdentityNotes = Array.isArray(parsed.identityNotes)
         ? parsed.identityNotes.filter((note): note is string => typeof note === 'string' && Boolean(note.trim()))
         : DEFAULT_COMPANION_IDENTITY.identityNotes.slice();
+      const identityNotes = sanitizeCompanionIdentityNotes(displayName, parsedIdentityNotes);
 
-      return {
+      const profile = {
         displayName,
         identityNotes: dedupeTextList(identityNotes).slice(0, 8),
         updatedAt: typeof parsed.updatedAt === 'string' && parsed.updatedAt
           ? parsed.updatedAt
           : new Date().toISOString(),
       };
+      if (
+        JSON.stringify(profile.identityNotes) !== JSON.stringify(parsedIdentityNotes)
+        || profile.displayName !== parsed.displayName
+      ) {
+        fs.mkdirSync(this.baseDir, { recursive: true });
+        fs.writeFileSync(this.companionIdentityPath, JSON.stringify(profile, null, 2), 'utf8');
+      }
+
+      return profile;
     } catch {
       return {
         ...DEFAULT_COMPANION_IDENTITY,
@@ -190,7 +200,10 @@ export class AgentMemoryStore {
   }): CompanionIdentityProfile {
     const current = this.getCompanionIdentity();
     const nextIdentityNotes = Array.isArray(update.identityNotes) && update.identityNotes.length
-      ? dedupeTextList(update.identityNotes)
+      ? sanitizeCompanionIdentityNotes(
+        update.displayName?.trim() || current.displayName,
+        dedupeTextList(update.identityNotes),
+      )
       : current.identityNotes;
     const nextProfile: CompanionIdentityProfile = {
       displayName: update.displayName?.trim() || current.displayName,
@@ -760,6 +773,33 @@ function dedupeTextList(items: string[]): string[] {
   }
 
   return Array.from(deduped.values());
+}
+
+function sanitizeCompanionIdentityNotes(displayName: string, notes: string[]): string[] {
+  const deduped = new Set<string>();
+
+  for (const note of notes) {
+    const normalized = note.replace(/\s+/g, ' ').trim();
+    if (!normalized) {
+      continue;
+    }
+
+    if (shouldDropStaleIdentityNote(displayName, normalized)) {
+      continue;
+    }
+
+    deduped.add(normalized);
+  }
+
+  return Array.from(deduped.values());
+}
+
+function shouldDropStaleIdentityNote(displayName: string, note: string): boolean {
+  if (!displayName || note.includes(displayName)) {
+    return false;
+  }
+
+  return /改名|改叫|名字改成|以后叫|叫你|叫我|现在叫|自称|身份持续陪伴|身份陪伴/.test(note);
 }
 
 function extractCapabilitySignals(task: TaskRecord): StoredCapabilitySignal[] {

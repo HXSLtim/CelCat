@@ -5,6 +5,21 @@ import { logDebug } from '../../shared/debugLogger';
 import type { SessionSnapshot } from '../../types/session';
 import type { AgentCapabilityCatalogEntry, TaskRecord } from '../../types/tasks';
 import type { UserSettings } from '../../types/settings';
+import {
+  buildControlPanelDashboard,
+  buildControlPanelTaskDetail,
+  buildControlPanelMemoryDocumentDetail,
+  buildControlPanelMemoryDocuments,
+  buildControlPanelMemoryOverview,
+  buildControlPanelTaskList,
+  buildControlPanelTaskTimeline,
+  type ControlPanelDashboard,
+  type ControlPanelTaskDetail,
+  type ControlPanelMemoryDocumentDetail,
+  type ControlPanelMemoryDocumentListItem,
+  type ControlPanelMemoryOverview,
+  type ControlPanelTaskListItem,
+} from './viewModels';
 
 type ControlPanelServerDependencies = {
   staticRoot: string;
@@ -27,6 +42,9 @@ type ControlPanelStatePayload = {
   session: SessionSnapshot | null;
   latestTask: TaskRecord | null;
   tasks: TaskRecord[];
+  taskList: ControlPanelTaskListItem[];
+  dashboard: ControlPanelDashboard;
+  memoryOverview: ControlPanelMemoryOverview;
   settings: UserSettings;
   capabilities: AgentCapabilityCatalogEntry[];
   controlPanelUrl: string | null;
@@ -144,6 +162,38 @@ export class ControlPanelServer {
       return;
     }
 
+    if (method === 'GET' && pathname === '/api/dashboard') {
+      this.sendJson(response, 200, this.buildDashboardPayload());
+      return;
+    }
+
+    if (method === 'GET' && pathname === '/api/tasks') {
+      this.sendJson(response, 200, this.buildTaskListPayload());
+      return;
+    }
+
+    if (method === 'GET' && pathname === '/api/memory/overview') {
+      this.sendJson(response, 200, this.buildMemoryOverviewPayload());
+      return;
+    }
+
+    if (method === 'GET' && pathname === '/api/memory/docs') {
+      this.sendJson(response, 200, this.buildMemoryDocumentListPayload());
+      return;
+    }
+
+    const memoryDocMatch = pathname.match(/^\/api\/memory\/docs\/([^/]+)$/);
+    if (method === 'GET' && memoryDocMatch) {
+      const memoryDoc = this.buildMemoryDocumentDetailPayload(memoryDocMatch[1]);
+      if (!memoryDoc) {
+        this.sendJson(response, 404, { error: 'Memory document not found' });
+        return;
+      }
+
+      this.sendJson(response, 200, memoryDoc);
+      return;
+    }
+
     const taskActionMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/(approve|cancel)$/);
     if (method === 'POST' && taskActionMatch) {
       const taskId = taskActionMatch[1];
@@ -158,6 +208,30 @@ export class ControlPanelServer {
       }
 
       this.sendJson(response, 200, task);
+      return;
+    }
+
+    const taskTimelineMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/timeline$/);
+    if (method === 'GET' && taskTimelineMatch) {
+      const task = this.dependencies.taskStore.get(taskTimelineMatch[1]);
+      if (!task) {
+        this.sendJson(response, 404, { error: 'Task not found' });
+        return;
+      }
+
+      this.sendJson(response, 200, buildControlPanelTaskTimeline(task));
+      return;
+    }
+
+    const taskDetailMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/detail$/);
+    if (method === 'GET' && taskDetailMatch) {
+      const taskDetail = this.buildTaskDetailPayload(taskDetailMatch[1]);
+      if (!taskDetail) {
+        this.sendJson(response, 404, { error: 'Task not found' });
+        return;
+      }
+
+      this.sendJson(response, 200, taskDetail);
       return;
     }
 
@@ -188,15 +262,62 @@ export class ControlPanelServer {
   }
 
   private buildStatePayload(): ControlPanelStatePayload {
+    const tasks = this.dependencies.taskStore.list();
+    const latestTask = this.dependencies.taskStore.getLatestActive();
+    const session = this.dependencies.getSessionSnapshot();
+    const settings = this.dependencies.getSettings();
+    const memoryOverview = buildControlPanelMemoryOverview(tasks);
+
     return {
       generatedAt: new Date().toISOString(),
-      session: this.dependencies.getSessionSnapshot(),
-      latestTask: this.dependencies.taskStore.getLatestActive(),
-      tasks: this.dependencies.taskStore.list(),
-      settings: this.dependencies.getSettings(),
+      session,
+      latestTask,
+      tasks,
+      taskList: buildControlPanelTaskList(tasks),
+      dashboard: buildControlPanelDashboard({
+        session,
+        latestTask,
+        tasks,
+        settings,
+        memoryOverview,
+      }),
+      memoryOverview,
+      settings,
       capabilities: this.dependencies.getCapabilities(),
       controlPanelUrl: this.resolvedUrl,
     };
+  }
+
+  private buildDashboardPayload(): ControlPanelDashboard {
+    const tasks = this.dependencies.taskStore.list();
+    return buildControlPanelDashboard({
+      session: this.dependencies.getSessionSnapshot(),
+      latestTask: this.dependencies.taskStore.getLatestActive(),
+      tasks,
+      settings: this.dependencies.getSettings(),
+      memoryOverview: buildControlPanelMemoryOverview(tasks),
+    });
+  }
+
+  private buildMemoryOverviewPayload(): ControlPanelMemoryOverview {
+    return buildControlPanelMemoryOverview(this.dependencies.taskStore.list());
+  }
+
+  private buildTaskListPayload(): ControlPanelTaskListItem[] {
+    return buildControlPanelTaskList(this.dependencies.taskStore.list());
+  }
+
+  private buildTaskDetailPayload(taskId: string): ControlPanelTaskDetail | null {
+    const task = this.dependencies.taskStore.get(taskId);
+    return task ? buildControlPanelTaskDetail(task) : null;
+  }
+
+  private buildMemoryDocumentListPayload(): ControlPanelMemoryDocumentListItem[] {
+    return buildControlPanelMemoryDocuments(this.dependencies.taskStore.list());
+  }
+
+  private buildMemoryDocumentDetailPayload(documentId: string): ControlPanelMemoryDocumentDetail | null {
+    return buildControlPanelMemoryDocumentDetail(this.dependencies.taskStore.list(), documentId);
   }
 
   private resolveStaticPath(pathname: string): string | null {

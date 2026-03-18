@@ -39,3 +39,13 @@ test('renderer shell no longer embeds the agent workspace panel in the pet windo
   assert.doesNotMatch(html, /id="workspace-panel"/, 'index.html should not embed a workspace panel');
   assert.doesNotMatch(html, /Agent 工作区/, 'pet window should not show the agent workspace heading');
 });
+
+test('renderer shell keeps the pet window free of visible chrome controls', () => {
+  const htmlPath = path.join(__dirname, '..', 'src', 'renderer', 'index.html');
+  const html = fs.readFileSync(htmlPath, 'utf8');
+
+  assert.doesNotMatch(html, /id="menu-button"/, 'pet window should not show a menu trigger');
+  assert.doesNotMatch(html, /id="window-menu"/, 'pet window should not embed a menu surface');
+  assert.doesNotMatch(html, /auto-execute-toggle/, 'pet window should not expose auto-execute controls');
+  assert.match(html, /id="assistant-status"/, 'pet window should keep the unified status surface');
+});
