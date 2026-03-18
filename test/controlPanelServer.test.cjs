@@ -213,14 +213,28 @@ test('ControlPanelServer serves state and task mutation endpoints over localhost
   assert.equal(timeline.timeline[1].label, '启动浏览器');
   assert.equal(timeline.timeline[1].status, 'in_progress');
 
+  const forbiddenApproveResponse = await fetch(`${url}/api/tasks/task-1/approve`, {
+    method: 'POST',
+  });
+  assert.equal(forbiddenApproveResponse.status, 403);
+  assert.deepEqual(approvals, []);
+
   const approveResponse = await fetch(`${url}/api/tasks/task-1/approve`, {
     method: 'POST',
+    headers: {
+      Origin: url,
+      'X-CelCat-Request': 'control-panel',
+    },
   });
   assert.equal(approveResponse.status, 200);
   assert.deepEqual(approvals, ['task-1']);
 
   const cancelResponse = await fetch(`${url}/api/tasks/task-1/cancel`, {
     method: 'POST',
+    headers: {
+      Origin: url,
+      'X-CelCat-Request': 'control-panel',
+    },
   });
   assert.equal(cancelResponse.status, 200);
   assert.deepEqual(cancellations, ['task-1']);

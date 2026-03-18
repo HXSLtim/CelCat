@@ -164,7 +164,7 @@ test('control panel refreshState degrades gracefully when api/state fails', asyn
 });
 
 test('control panel mutateTask surfaces request failures without throwing', async () => {
-  const { api, alertCalls } = loadControlPanelApp({
+  const { api, alertCalls, fetchCalls } = loadControlPanelApp({
     fetchImpl: async () => ({
       ok: false,
     }),
@@ -174,6 +174,9 @@ test('control panel mutateTask surfaces request failures without throwing', asyn
 
   assert.equal(api.state.requestError, '任务审批失败');
   assert.deepEqual(alertCalls, ['任务审批失败']);
+  assert.equal(fetchCalls[0][0], '/api/tasks/task-1/approve');
+  assert.equal(fetchCalls[0][1].method, 'POST');
+  assert.equal(fetchCalls[0][1].headers['X-CelCat-Request'], 'control-panel');
 });
 
 test('control panel refreshState prefers dashboard, memory overview, and timeline endpoints when available', async () => {

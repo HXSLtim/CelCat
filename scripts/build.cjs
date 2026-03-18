@@ -2,6 +2,7 @@ const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { getStaticCopyPlan } = require('./build-utils.cjs');
+const { buildRendererBundle } = require('./build-renderer.cjs');
 
 const projectRoot = path.resolve(__dirname, '..');
 const distRoot = path.join(projectRoot, 'dist');
@@ -34,4 +35,5 @@ function copyStaticAssets() {
 
 fs.rmSync(distRoot, { recursive: true, force: true });
 runTypeScriptBuild();
+buildRendererBundle(projectRoot, distRoot);
 copyStaticAssets();

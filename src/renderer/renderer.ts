@@ -13,6 +13,7 @@ import { VoiceRecognitionController } from './voice/voiceRecognition';
 import { PcmAudioPlayer } from './voice/pcmAudioPlayer';
 import type { VoiceUiState } from './voice/voiceUi';
 import { selectCompanionStatus, selectRelevantTask } from './status/companionStatus';
+import { Live2DManager } from './live2d/live2d';
 import type { SessionEvent, SessionSnapshot } from '../types/session';
 import type { TaskRecord } from '../types/tasks';
 import type { WindowStateEvent, WindowStateSnapshot } from '../types/windowState';
@@ -21,24 +22,12 @@ import { safeConsoleLog } from '../shared/debugLogger';
 const LONG_PRESS_DRAG_DELAY_MS = 260;
 const LONG_PRESS_DRAG_MOVE_TOLERANCE_PX = 12;
 
-type Live2DManagerInstance = {
-  loadModel(): Promise<void>;
-  onTouch(position: PIXI.IPointData): void;
-  refitModel(): void;
-  playAssistantExpression(expressionName: string | null, options?: { force?: boolean; intensity?: number }): boolean;
-  setSpeechLevel(level: number): void;
-};
-
-type Live2DModule = {
-  Live2DManager: new (app: PIXI.Application) => Live2DManagerInstance;
-};
+type Live2DManagerInstance = Live2DManager;
 
 (globalThis as typeof globalThis & { __CELCAT_DEBUG__?: boolean }).__CELCAT_DEBUG__ =
-  process.argv.includes('--dev');
+  Boolean(window.electronAPI.runtime.isDev);
 (window as typeof window & { PIXI?: typeof PIXI }).PIXI = PIXI;
 installPixiUnsafeEval(PIXI as unknown as { ShaderSystem: typeof PIXI.ShaderSystem });
-
-const { Live2DManager } = require('./live2d/live2d') as Live2DModule;
 
 class DesktopCompanion {
   private app: PIXI.Application | null = null;

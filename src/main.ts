@@ -36,6 +36,38 @@ let controlPanelServer: InstanceType<typeof ControlPanelServer> | null = null;
 const DEFAULT_WINDOW_SIZE = { width: 300, height: 400 };
 let isCompanionFullscreen = false;
 let windowedBounds: Electron.Rectangle | null = null;
+const TRUTHY_ENV_VALUES = new Set(['1', 'true', 'yes', 'on']);
+const FALSY_ENV_VALUES = new Set(['0', 'false', 'no', 'off']);
+
+function shouldDisableGpuAcceleration(
+  env: Record<string, string | undefined> = process.env,
+  platform = process.platform,
+): boolean {
+  const rawValue = String(env.CELCAT_DISABLE_GPU || '').trim().toLowerCase();
+  if (TRUTHY_ENV_VALUES.has(rawValue)) {
+    return true;
+  }
+  if (FALSY_ENV_VALUES.has(rawValue)) {
+    return false;
+  }
+
+  return platform === 'linux';
+}
+
+function isSafeControlPanelUrl(candidateUrl: string): boolean {
+  try {
+    const url = new URL(candidateUrl);
+    return url.protocol === 'http:' && (url.hostname === '127.0.0.1' || url.hostname === 'localhost');
+  } catch {
+    return false;
+  }
+}
+
+if (shouldDisableGpuAcceleration()) {
+  app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch('disable-gpu');
+  app.commandLine.appendSwitch('disable-gpu-compositing');
+}
 
 function getWindowStateSnapshot(): WindowStateSnapshot {
   return {
@@ -109,12 +141,16 @@ function createWindow(): void {
     fullscreenable: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
-      nodeIntegration: true,
-      contextIsolation: false,
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
     },
   });
 
   mainWindow!.loadFile(path.join(__dirname, 'renderer/index.html'));
+  mainWindow!.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 
   if (shouldMirrorRendererLogs) {
     mainWindow!.webContents.on('did-finish-load', () => {
@@ -242,7 +278,8 @@ ipcMain.handle('control-panel:get-url', async () => {
 
 ipcMain.handle('control-panel:open', async () => {
   const url = controlPanelServer?.getUrl() || await controlPanelServer?.start?.();
-  if (!url) {
+  if (!url || !isSafeControlPanelUrl(url)) {
+    safeConsoleError('Refusing to open unexpected control panel URL', { url });
     return null;
   }
 

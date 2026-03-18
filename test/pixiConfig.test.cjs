@@ -33,7 +33,7 @@ test('getViewportSize falls back to the default companion size when viewport is 
 test('renderer bundle installs the Pixi unsafe-eval compatibility patch before boot', () => {
   assert.match(
     rendererBundle,
-    /unsafe_eval_1\.install\)\(PIXI\)|installPixiUnsafeEval\(PIXI\)/,
+    /init_unsafe_eval\(\)|Unable to patch ShaderSystem, class not found\./,
     'renderer.js should explicitly install the Pixi unsafe-eval patch',
   );
 });

@@ -6,6 +6,9 @@ import type { WindowStateEvent, WindowStateSnapshot } from './windowState';
 type Unsubscribe = () => void;
 
 type ElectronApi = {
+  runtime: {
+    isDev: boolean;
+  };
   windowDrag: {
     getPosition(): Promise<[number, number]>;
     setPosition(nextX: number, nextY: number): void;

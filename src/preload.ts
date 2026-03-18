@@ -19,6 +19,9 @@ function subscribe<EventPayload>(
 }
 
 const electronApi = {
+  runtime: {
+    isDev: process.argv.includes('--dev'),
+  },
   windowDrag: {
     getPosition(): Promise<[number, number]> {
       return ipcRenderer.invoke('window-drag:get-position');

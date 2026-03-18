@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta
     http-equiv="Content-Security-Policy"
-    content="default-src 'self'; script-src 'self' https://cubism.live2d.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' https: wss:; worker-src 'self' blob:;"
+    content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' https: wss:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none';"
   >
   <title>Live2D Companion</title>
   <link rel="stylesheet" href="styles/main.css">
@@ -14,7 +14,7 @@
     <div id="assistant-status" aria-live="polite" aria-atomic="true"></div>
     <canvas id="live2d-canvas"></canvas>
   </div>
-  <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+  <script src="./vendor/live2dcubismcore.min.js"></script>
   <script src="./bootstrap.js"></script>
 </body>
 </html>

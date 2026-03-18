@@ -7,19 +7,24 @@ test('renderer shell loads the Cubism runtime before booting the renderer bundle
   const htmlPath = path.join(__dirname, '..', 'src', 'renderer', 'index.html');
   const html = fs.readFileSync(htmlPath, 'utf8');
 
-  const runtimeMarker = 'live2dcubismcore.min.js';
+  const runtimeMarker = '<script src="./vendor/live2dcubismcore.min.js"></script>';
   const bundleMarker = '<script src="./bootstrap.js"></script>';
   const cspMarker = 'Content-Security-Policy';
 
-  assert.notStrictEqual(
-    html.indexOf(runtimeMarker),
-    -1,
-    'index.html should load the Cubism runtime before starting the renderer',
+  assert.match(
+    html,
+    /script-src 'self'/,
+    'index.html should only allow local scripts in its CSP',
+  );
+  assert.doesNotMatch(
+    html,
+    /cubism\.live2d\.com/,
+    'index.html should no longer depend on the remote Cubism runtime',
   );
   assert.notStrictEqual(
     html.indexOf(bundleMarker),
     -1,
-    'index.html should bootstrap the CommonJS renderer bundle with a local script',
+    'index.html should bootstrap the local renderer bundle with a local script',
   );
   assert.notStrictEqual(
     html.indexOf(cspMarker),

@@ -966,6 +966,9 @@ async function mutateTask(taskId, action) {
   try {
     const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/${action}`, {
       method: 'POST',
+      headers: {
+        'X-CelCat-Request': 'control-panel',
+      },
     });
     if (!response.ok) {
       throw new Error(`任务${action === 'approve' ? '审批' : '取消'}失败`);

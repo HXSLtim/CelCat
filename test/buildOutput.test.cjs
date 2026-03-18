@@ -37,3 +37,11 @@ test('build output includes the renderer bootstrap script', () => {
     'build should copy the renderer bootstrap script into dist/renderer',
   );
 });
+
+test('build output includes the local Cubism runtime', () => {
+  const runtimePath = path.join(__dirname, '..', 'dist', 'renderer', 'vendor', 'live2dcubismcore.min.js');
+  assert.ok(
+    fs.existsSync(runtimePath),
+    'build should copy the local Cubism runtime into dist/renderer/vendor',
+  );
+});

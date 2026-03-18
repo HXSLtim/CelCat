@@ -196,6 +196,11 @@ export class ControlPanelServer {
 
     const taskActionMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/(approve|cancel)$/);
     if (method === 'POST' && taskActionMatch) {
+      if (!this.isTrustedMutationRequest(request)) {
+        this.sendJson(response, 403, { error: 'Forbidden' });
+        return;
+      }
+
       const taskId = taskActionMatch[1];
       const action = taskActionMatch[2];
       const task = action === 'approve'
@@ -318,6 +323,28 @@ export class ControlPanelServer {
 
   private buildMemoryDocumentDetailPayload(documentId: string): ControlPanelMemoryDocumentDetail | null {
     return buildControlPanelMemoryDocumentDetail(this.dependencies.taskStore.list(), documentId);
+  }
+
+  private isTrustedMutationRequest(request: http.IncomingMessage): boolean {
+    if (!this.resolvedUrl) {
+      return false;
+    }
+
+    const requestMarker = request.headers['x-celcat-request'];
+    const marker = Array.isArray(requestMarker) ? requestMarker[0] : requestMarker;
+    if (marker !== 'control-panel') {
+      return false;
+    }
+
+    const originHeader = request.headers.origin;
+    const origin = Array.isArray(originHeader) ? originHeader[0] : originHeader;
+    if (origin === this.resolvedUrl) {
+      return true;
+    }
+
+    const refererHeader = request.headers.referer;
+    const referer = Array.isArray(refererHeader) ? refererHeader[0] : refererHeader;
+    return Boolean(referer && referer.startsWith(`${this.resolvedUrl}/`));
   }
 
   private resolveStaticPath(pathname: string): string | null {
